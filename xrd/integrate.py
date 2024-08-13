@@ -1,11 +1,11 @@
+from functools import lru_cache
 from pyFAI import AzimuthalIntegrator
 from pyFAI.multi_geometry import MultiGeometry
 import fabio
 import h5py
 
-ai_cache = {}
 
-
+@lru_cache(maxsize=10)
 def get_azimuthal_integrator(poni_path, integration_type, num_points):
     """
     Get an AzimuthalIntegrator object from the cache or create a new one if it doesn't exist. Use the cache to avoid
@@ -16,11 +16,9 @@ def get_azimuthal_integrator(poni_path, integration_type, num_points):
     :param num_points: number of points to use for the integration
     :return: AzimuthalIntegrator object
     """
-    key = (poni_path, integration_type, num_points)
-    if key not in ai_cache:
-        ai_cache[key] = AzimuthalIntegrator()
-        ai_cache[key].load(poni_path)
-    return ai_cache[key]
+    ai = AzimuthalIntegrator()
+    ai.load(poni_path)
+    return ai
 
 
 def integrate_single(image_path, poni_path, h5_output_path, num_points=1000):
@@ -50,9 +48,7 @@ def integrate_single(image_path, poni_path, h5_output_path, num_points=1000):
         f.create_dataset("cake/chi", data=chi)
 
 
-mg_cache = {}
-
-
+@lru_cache(maxsize=10)
 def get_multi_geometry(
     poni_paths,
     integration_type,
@@ -64,22 +60,21 @@ def get_multi_geometry(
     Get a MultiGeometry object from the cache or create a new one if it doesn't exist. Use the cache to avoid
     loading the same PONI file multiple times. (the initialization of the MultiGeometry object is expensive)
 
-    :param poni_paths: list of paths to the PONI files which contain the calibration parameters
+    It is important that the poni_paths are given as tuple rather than a list to ensure that the cache works correctly.
+
+    :param poni_paths: tuple of paths to the PONI files which contain the calibration parameters
     :param integration_type: type of integration to perform ("1D" or "2D")
     :param num_points: number of points in two theta to use for the integration
     :param radial_range: radial range in two theta degrees for the 1D and 2d integration
     :param azimuth_range: azimuthal range in degrees for the 2D integration
     :return: MultiGeometry object
     """
-    key = (tuple(poni_paths), integration_type, num_points, radial_range, azimuth_range)
-    if key not in mg_cache:
-        mg_cache[key] = MultiGeometry(
-            poni_paths,
-            unit="2th_deg",
-            radial_range=radial_range,
-            azimuth_range=azimuth_range,
-        )
-    return mg_cache[key]
+    return MultiGeometry(
+        poni_paths,
+        unit="2th_deg",
+        radial_range=radial_range,
+        azimuth_range=azimuth_range,
+    )
 
 
 def integrate_multiple(
@@ -101,8 +96,8 @@ def integrate_multiple(
     :param azimuth_range: azimuthal range in degrees for the 2D integration
     """
     imgs = [fabio.open(image_path).data for image_path in image_paths]
-    mg_1d = get_multi_geometry(poni_paths, "1D", radial_range, azimuth_range)
-    mg_2d = get_multi_geometry(poni_paths, "2D", radial_range, azimuth_range)
+    mg_1d = get_multi_geometry(tuple(poni_paths), "1D", radial_range, azimuth_range)
+    mg_2d = get_multi_geometry(tuple(poni_paths), "2D", radial_range, azimuth_range)
 
     x, y = mg_1d.integrate1d(imgs, num_points)
     int, tth, chi = mg_2d.integrate2d(imgs, num_points, 360)

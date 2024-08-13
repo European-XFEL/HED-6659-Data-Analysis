@@ -51,9 +51,9 @@ def test_ai_caching():
 
 def test_integrate_multiple(tmp_path):
     projected_image_path = os.path.join(data_path, "dummy.tif")
-    projected_image_paths = [projected_image_path, projected_image_path]
+    projected_image_paths = (projected_image_path, projected_image_path)
     projected_poni_path = os.path.join(data_path, "dummy.poni")
-    projected_poni_paths = [projected_poni_path, projected_poni_path]
+    projected_poni_paths = (projected_poni_path, projected_poni_path)
 
     integrate_multiple(
         projected_image_paths, projected_poni_paths, tmp_path / "output.h5", 1000
@@ -80,19 +80,19 @@ def test_integrate_multiple(tmp_path):
 
 def test_mg_caching():
     mg1 = get_multi_geometry(
-        [os.path.join(data_path, "dummy.poni")], "1D", 1000, radial_range=(0, 180)
+        (os.path.join(data_path, "dummy.poni"),), "1D", 1000, radial_range=(0, 180)
     )
     mg2 = get_multi_geometry(
-        [os.path.join(data_path, "dummy.poni")], "1D", 1000, radial_range=(0, 360)
+        (os.path.join(data_path, "dummy.poni"),), "1D", 1000, radial_range=(0, 360)
     )
     assert mg1 is not mg2, "Should return different objects for different radial ranges"
 
-    mg3 = get_multi_geometry([os.path.join(data_path, "dummy.poni")], "1D", 1000)
-    mg4 = get_multi_geometry([os.path.join(data_path, "dummy.poni")], "1D", 2000)
+    mg3 = get_multi_geometry((os.path.join(data_path, "dummy.poni"),), "1D", 1000)
+    mg4 = get_multi_geometry((os.path.join(data_path, "dummy.poni"),), "1D", 2000)
     assert mg3 is not mg4, "Should return different objects for different num_points"
 
-    mg5 = get_multi_geometry([os.path.join(data_path, "dummy.poni")], "1D", 1000)
-    mg6 = get_multi_geometry([os.path.join(data_path, "dummy.poni")], "2D", 1000)
+    mg5 = get_multi_geometry((os.path.join(data_path, "dummy.poni"),), "1D", 1000)
+    mg6 = get_multi_geometry((os.path.join(data_path, "dummy.poni"),), "2D", 1000)
     assert (
         mg5 is not mg6
     ), "Should return different objects for different integration types"
