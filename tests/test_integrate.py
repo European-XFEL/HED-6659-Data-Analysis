@@ -1,5 +1,6 @@
 import os
 import h5py
+from timeit import repeat
 from . import unittest_data_path
 
 from xrd.integrate import (
@@ -49,6 +50,28 @@ def test_ai_caching():
     assert ai1 is not ai2, "Should return different objects for different num_points"
 
 
+def test_cached_ai_speedup(tmp_path):
+    projected_image_path = os.path.join(data_path, "dummy.tif")
+    projected_poni_path = os.path.join(data_path, "dummy.poni")
+    get_azimuthal_integrator.cache_clear()
+
+    def repeat_func():
+        integrate_single(
+            projected_image_path, projected_poni_path, tmp_path / "output.h5"
+        )
+
+    times = repeat(
+        repeat_func,
+        repeat=5,
+        number=1,
+    )
+    # all times should be faster than the first:
+    print("Integration times of a single image:")
+    print(times)
+
+    assert all([times[0] > t for t in times[1:]]), "Should be faster with caching"
+
+
 def test_integrate_multiple(tmp_path):
     projected_image_path = os.path.join(data_path, "dummy.tif")
     projected_image_paths = (projected_image_path, projected_image_path)
@@ -76,6 +99,35 @@ def test_integrate_multiple(tmp_path):
         assert f["cake/intensity"].shape == (360, 1000)
         assert f["cake/tth"].shape == (1000,)
         assert f["cake/chi"].shape == (360,)
+
+
+def test_cached_mg_speedup(tmp_path):
+    get_multi_geometry.cache_clear()
+    projected_image_path = os.path.join(data_path, "dummy.tif")
+    projected_image_paths = (projected_image_path, projected_image_path)
+    projected_poni_path = os.path.join(data_path, "dummy.poni")
+    projected_poni_paths = (projected_poni_path, projected_poni_path)
+
+    def repeat_func():
+        integrate_multiple(
+            projected_image_paths,
+            projected_poni_paths,
+            tmp_path / "output.h5",
+            1000,
+            (0, 45),
+        )
+
+    times = repeat(
+        repeat_func,
+        repeat=5,
+        number=1,
+    )
+
+    # all times should be faster than the first:
+    print("Integration times for two images:")
+    print(times)
+
+    assert all([times[0] > t for t in times[1:]]), "Should be faster with caching"
 
 
 def test_mg_caching():
