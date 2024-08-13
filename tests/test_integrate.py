@@ -24,14 +24,14 @@ def test_integrate_single(tmp_path):
         assert "pattern" in f
         assert "cake" in f
 
-        assert "x" in f["pattern"]
-        assert "y" in f["pattern"]
+        assert "tth" in f["pattern"]
+        assert "intensity" in f["pattern"]
         assert "intensity" in f["cake"]
         assert "tth" in f["cake"]
         assert "chi" in f["cake"]
 
-        assert f["pattern/x"].shape == (1000,)
-        assert f["pattern/y"].shape == (1000,)
+        assert f["pattern/tth"].shape == (1000,)
+        assert f["pattern/intensity"].shape == (1000,)
         assert f["cake/intensity"].shape == (360, 1000)
         assert f["cake/tth"].shape == (1000,)
         assert f["cake/chi"].shape == (360,)
@@ -65,14 +65,14 @@ def test_integrate_multiple(tmp_path):
         assert "pattern" in f
         assert "cake" in f
 
-        assert "x" in f["pattern"]
-        assert "y" in f["pattern"]
+        assert "tth" in f["pattern"]
+        assert "intensity" in f["pattern"]
         assert "intensity" in f["cake"]
         assert "tth" in f["cake"]
         assert "chi" in f["cake"]
 
-        assert f["pattern/x"].shape == (1000,)
-        assert f["pattern/y"].shape == (1000,)
+        assert f["pattern/tth"].shape == (1000,)
+        assert f["pattern/intensity"].shape == (1000,)
         assert f["cake/intensity"].shape == (360, 1000)
         assert f["cake/tth"].shape == (1000,)
         assert f["cake/chi"].shape == (360,)

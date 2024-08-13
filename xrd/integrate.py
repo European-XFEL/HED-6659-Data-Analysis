@@ -23,7 +23,16 @@ def get_azimuthal_integrator(poni_path, integration_type, num_points):
 
 def integrate_single(image_path, poni_path, h5_output_path, num_points=1000):
     """
-    Integrate a single image using a 1D and 2D integration and save the results to an HDF5 file.
+    Integrate a single XRD to a pattern and Cake and save the results to an HDF5 file.
+
+    The structure of the HDF5 file should be as follows:
+    - pattern
+        - tth: 1D array of the x values
+        - intensity: 1D array of the y values
+    - cake
+        - intensity: 2D array of the intensity values
+        - tth: 1D array of the two theta values
+        - chi: 1D array of the chi values
 
     :param image_path: path to the image to integrate
     :param poni_path: path to the PONI file which contains the calibration parameters
@@ -39,8 +48,8 @@ def integrate_single(image_path, poni_path, h5_output_path, num_points=1000):
     # save xy and 2D integration results to HDF5 in individual groups (pattern, and cake)
     with h5py.File(h5_output_path, "w") as f:
         f.create_group("pattern")
-        f.create_dataset("pattern/x", data=x)
-        f.create_dataset("pattern/y", data=y)
+        f.create_dataset("pattern/tth", data=x)
+        f.create_dataset("pattern/intensity", data=y)
 
         f.create_group("cake")
         f.create_dataset("cake/intensity", data=int)
@@ -88,6 +97,15 @@ def integrate_multiple(
     """
     Integrate multiple images combining them into a pattern and Cake and save the results to an HDF5 file.
 
+    The structure of the HDF5 file should be as follows:
+    - pattern
+        - tth: 1D array of the x values
+        - intensity: 1D array of the y values
+    - cake
+        - intensity: 2D array of the intensity values
+        - tth: 1D array of the two theta values
+        - chi: 1D array of the chi values
+
     :param image_paths: list of paths to the images to integrate
     :param poni_paths: list of paths to the PONI files which contain the calibration parameters
     :param h5_output_path: path to the output HDF5 file
@@ -104,8 +122,8 @@ def integrate_multiple(
 
     with h5py.File(h5_output_path, "w") as f:
         f.create_group("pattern")
-        f.create_dataset("pattern/x", data=x)
-        f.create_dataset("pattern/y", data=y)
+        f.create_dataset("pattern/tth", data=x)
+        f.create_dataset("pattern/intensity", data=y)
 
         f.create_group("cake")
         f.create_dataset("cake/intensity", data=int)
