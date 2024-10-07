@@ -1,0 +1,37 @@
+[global]
+dirTransformationMaps = '/gpfs/exfel/exp/HED/202405/p006656/usr/Software/VISAR/VISAR_DewarpingCalibration/'
+
+[KEPLER1]
+dx = 0.5                                      # µm/pixel
+pixDipole_0ns.20ns = 2118.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 20 ns sweep window -- r57
+pixDipole_0ns.10ns = 2101.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r67
+pixDipole_0ns.50ns = 1761.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r62
+pixXray = 2000.0                              # Xray pixel position at 0 ns delay, 0 ns sweep delay -- r55-56 (very weak change -- might need to refine)
+sweepTime.20ns = 0.00580                      # Sweep time -- r57-58-59 
+sweepTime.10ns = 0.00282                      # Sweep time -- r67-68-69
+sweepTime.50ns = 0.01466                      # Sweep time -- r62-63-64
+positionTrigger_ref.20ns = 58911960.34999999  # run['HED_EXP_VISAR/TSYS/ARM_1_TRIG', 'actualPosition'].ndarray() -- r57
+positionTrigger_ref.10ns = 58911976.75038461  # run['HED_EXP_VISAR/TSYS/ARM_1_TRIG', 'actualPosition'].ndarray() -- r67
+positionTrigger_ref.50ns = 58911864.505       # run['HED_EXP_VISAR/TSYS/ARM_1_TRIG', 'actualPosition'].ndarray() -- r62
+transformationMaps.5ns = 'VISAR_KEPLER1_20nsWindow_p2740_run639_evt1_polynomial.cal'
+transformationMaps.10ns = 'VISAR_KEPLER1_20nsWindow_p2740_run639_evt1_polynomial.cal'
+transformationMaps.20ns = 'VISAR_KEPLER1_20nsWindow_p2740_run639_evt1_polynomial.cal'
+transformationMaps.50ns = 'VISAR_KEPLER1_20nsWindow_p2740_run639_evt1_polynomial.cal'
+
+[KEPLER2]
+dx = 0.4                                      # µm/pixel
+pixDipole_0ns.20ns = 2094.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 20 ns sweep window -- r57
+pixDipole_0ns.10ns = 2150.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r67
+pixDipole_0ns.50ns = 1855.0                   # Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r62
+pixXray = 2000.0                              # Xray pixel position at 0 ns delay, 0 ns sweep delay -- r55-56 (very weak change -- might need to refine)
+sweepTime.20ns = 0.0054                       # Sweep time -- r57-58-59
+sweepTime.10ns = 0.00265                      # Sweep time -- r67-68-69
+sweepTime.50ns = 0.01456                      # Sweep time -- r62-63-64
+positionTrigger_ref.20ns = 58911961.75307691  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r57
+positionTrigger_ref.10ns = 58911978.25346153  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r67
+positionTrigger_ref.50ns = 58911854.11115384  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r62
+transformationMaps.5ns = 'VISAR_KEPLER2_20nsWindow_p2740_run1222_evt1_polynomial_AdditionalPointForXrayFiducial.cal'
+transformationMaps.10ns = 'VISAR_KEPLER2_20nsWindow_p2740_run1222_evt1_polynomial_AdditionalPointForXrayFiducial.cal'
+transformationMaps.20ns = 'VISAR_KEPLER2_20nsWindow_p2740_run1222_evt1_polynomial_AdditionalPointForXrayFiducial.cal'
+transformationMaps.50ns = 'VISAR_KEPLER2_20nsWindow_p2740_run1222_evt1_polynomial_AdditionalPointForXrayFiducial.cal'
+
