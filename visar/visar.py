@@ -8,7 +8,7 @@ import numpy as np
 import toml
 from extra_data import by_id, KeyData
 from pint import UnitRegistry
-from pint.UnitRegistry import Quantity as PintQuantity
+from pint.registry import Quantity as PintQuantity
 from scipy.interpolate import griddata
 
 ureg = UnitRegistry()
@@ -316,10 +316,6 @@ class _StreakCamera:
         info_str += f'\n  Train ID (ref.): {self.shots(reference=True)}'
         return info_str
 
-    @cached_property
-    def zero_delay_position(self) -> PintQuantity:
-        return self._quantity(self.arm['zeroDelayPosition'])
-
     @cache
     def sweep_delay(self, train_id=None) -> PintQuantity:
         for key in ['actualDelay', 'actualPosition']:
@@ -327,7 +323,7 @@ class _StreakCamera:
                 return self._quantity(self.trigger[key], train_id) - self.cal.reference_trigger_delay
 
     @cached_property
-    def sweep_time(self):
+    def sweep_time(self) -> PintQuantity:
         return Quantity(self.ctrl.run_value('timeRange'))
 
     @property
@@ -364,13 +360,17 @@ class _StreakCamera:
     def data(self, reference=False):
         """Get corrected data
         
-        Returns the dewarped data for the trains with PPU opened. If *reference*
+        Returns corrected data for the trains with PPU opened. If *reference*
         is True, returns the first frame with PPU closed instead.
         """
-        raise NotImplementedError
+        if (tid := self.shots(reference=reference)) is None:
+            return
+        frames = self.pixels[by_id[tid]].ndarray()
+        corrected = np.array([rotate(frame) for frame in frames])
+        return corrected
     
     @cache
-    def fel_delay(self, train_id: int):
+    def fel_delay(self, train_id: int) -> PintQuantity:
         return self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay(train_id) - self.sweep_delay(train_id)
 
     @cache
@@ -441,37 +441,38 @@ class _StreakCamera:
         run = meta.get('runNumber', '')
         fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
         with h5py.File(fpath, 'a') as fh:
-            if self.name not in fh:
-                visar = fh.create_group(self.name)
+            visar = fh.create_group(self.name)
 
-                ref = visar.create_group('Reference')
-                ref['Reference'] = self.data(reference=True)
-                ref['train ID'] = self.shots(reference=True)
+            ref = visar.create_group('Reference')
+            ref['Reference'] = self.data(reference=True)
+            ref['train ID'] = self.shots(reference=True)
 
-                shots = visar.create_group('Shots')
-                shots['Corrected images'] = self.data()
-                save_quantity(shots, "Time axis",
-                    np.vstack([self._time_axis(tid) for tid in self.shots()]))
-                save_quantity(shots, "Space axis",
-                    np.tile(self._space_axis(), (self.shots().size, 1)))
-                save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
-                save_quantity(shots, "Sensitivity", self.sensitivity)
-                save_quantity(shots, "Etalon thickness", self.etalon_thickness)
-                save_quantity(shots, "Etalon delay", self.temporal_delay)
-                save_quantity(shots, "Sweep window", self.sweep_time)
-                save_quantity(shots, "Sweep delay", self.sweep_delay())
-                save_quantity(shots, "Difference X-drive", self.fel_delay)
-                save_quantity(shots, "Train ID", self.shots())
+            shots = visar.create_group('Shots')
+            shots['Corrected images'] = self.data()
+            save_quantity(shots, "Time axis",
+                np.vstack([self._time_axis(tid) for tid in self.shots()]))
+            save_quantity(shots, "Space axis",
+                np.tile(self._space_axis(), (self.shots().size, 1)))
+            save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
+            save_quantity(shots, "Sweep window", self.sweep_time)
+            save_quantity(shots, "Sweep delay", self.sweep_delay())
+            save_quantity(shots, "Difference X-drive",
+                np.vstack([self.fel_delay(tid) for tid in self.shots()]))
+            shots["Train ID"] = self.shots()
 
             if self.dipole.name not in fh:
                 dipole = fh.create_group(self.dipole.name)
                 save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
-                save_quantity(dipole, "Delay", self.dipole.delay(self.shot()))
+                save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
                 # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
                 # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
 
 class _VISAR(_StreakCamera):
+    @cached_property
+    def zero_delay_position(self) -> PintQuantity:
+        return self._quantity(self.arm['zeroDelayPosition'])
+
     @cached_property
     def etalon_thickness(self) -> PintQuantity:
         return self._quantity(self.arm['etalonThickness'])
@@ -487,6 +488,46 @@ class _VISAR(_StreakCamera):
     @cached_property
     def temporal_delay(self) -> PintQuantity:
         return self._quantity(self.arm['temporalDelay'])
+    
+    def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
+        """Save the data for this VISAR in HDF5
+
+        output: str
+            The output directory to write the file
+        """
+        meta = self.run.run_metadata()
+        proposal = meta.get('proposalNumber', '')
+        run = meta.get('runNumber', '')
+        fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
+        with h5py.File(fpath, 'a') as fh:
+            visar = fh.create_group(self.name)
+
+            ref = visar.create_group('Reference')
+            ref['Reference'] = self.data(reference=True)
+            ref['train ID'] = self.shots(reference=True)
+
+            shots = visar.create_group('Shots')
+            shots['Corrected images'] = self.data()
+            save_quantity(shots, "Time axis",
+                np.vstack([self._time_axis(tid) for tid in self.shots()]))
+            save_quantity(shots, "Space axis",
+                np.tile(self._space_axis(), (self.shots().size, 1)))
+            save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
+            save_quantity(shots, "Sensitivity", self.sensitivity)
+            save_quantity(shots, "Etalon thickness", self.etalon_thickness)
+            save_quantity(shots, "Etalon delay", self.temporal_delay)
+            save_quantity(shots, "Sweep window", self.sweep_time)
+            save_quantity(shots, "Sweep delay", self.sweep_delay())
+            save_quantity(shots, "Difference X-drive",
+                np.vstack([self.fel_delay(tid) for tid in self.shots()]))
+            shots["Train ID"] = self.shots()
+
+            if self.dipole.name not in fh:
+                dipole = fh.create_group(self.dipole.name)
+                save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
+                save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
+                # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
+                # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
 
 class _KEPLER(_VISAR):
