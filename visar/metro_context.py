@@ -92,7 +92,7 @@ class VISARBase(ViewGroup):
     SWEEP_SPEED = {1: 50, 2: 20, 3: 10, 4: 5, 5: 1, 6: 100}
 
     calibration_file: Parameter = "/gpfs/exfel/data/user/tmichela/tmp/visar_calibration_values_6656.toml"
-    rot90: Parameter = -1
+    rot90: Parameter = 1
     fliplr: Parameter = False
     flipud: Parameter = False
     downsample: Parameter = 4
@@ -218,6 +218,7 @@ class VISAR(VISARBase):
         source, target = self.ref.map(sweep_time, data.shape)
 
         data = cv2.remap(data, source, target, cv2.INTER_CUBIC,borderMode=cv2.BORDER_CONSTANT)
+        data = np.flipud(np.fliplr(data))
         res = self._labelled(data, sweep_time, xray_delay, dipole_delay)
         print('>>', self.__class__.__name__, round(time() - self.t0, 3))
         return res
@@ -233,6 +234,7 @@ class VISAR_1w(VISARBase):
                             xray_delay: '{prefix}xrayDelay',
                             dipole_delay: 'view#dipoleDelay'):
         data = cv2.resize(data, (data.shape[1] * 2, data.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+        data = np.fliplr(data)
         res = self._labelled(data, sweep_time, xray_delay, dipole_delay)
         print('>>', self.__class__.__name__, round(time() - self.t0, 3))
         return res
