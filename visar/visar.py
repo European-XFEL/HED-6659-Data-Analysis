@@ -1,3 +1,4 @@
+from bisect import insort
 from enum import Enum
 from functools import cache, cached_property, lru_cache
 from pathlib import Path
@@ -6,14 +7,10 @@ import cv2
 import h5py
 import numpy as np
 import toml
-from extra_data import by_id, KeyData
-from pint import UnitRegistry
-from pint.registry import Quantity as PintQuantity
+import xarray as xr
+from extra_data import by_id, by_index, KeyData, DataCollection
 from scipy.interpolate import griddata
 
-ureg = UnitRegistry()
-ureg.setup_matplotlib(True)
-Quantity = ureg.Quantity
 
 VISAR_DEVICES = {
     'KEPLER1': {
@@ -59,60 +56,25 @@ def resize(image, row_factor=2, column_factor=2):
     )
 
 
-def rotate(image):
-    return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-
-def save_quantity(h5group, name, quantity):
-    """Save a Pint quantity to an HDF5 group.
-
-    Args:
-        h5group: h5py.Group or h5py.File object to save to
-        name: str, name of the dataset
-        quantity: pint.Quantity object to save
-    """
-    qty_group = h5group.create_group(name)
-    qty_group.create_dataset('magnitude', data=quantity.magnitude)
-    qty_group.attrs['units'] = str(quantity.units)
-
-
-def load_quantity(h5group, name):
-    """Load a Pint quantity from an HDF5 group.
-
-    Args:
-        h5group: h5py.Group or h5py.File object to load from
-        name: str, name of the dataset
-
-    Returns:
-        pint.Quantity: The loaded quantity with units
-    """
-    qty_group = h5group[name]
-    magnitude = qty_group['magnitude'][()]
-    units = qty_group.attrs['units']
-    return Quantity(magnitude, units)
-
-
-def as_single_value(kd: KeyData) -> PintQuantity:
-    value = kd.as_single_value()
-    if value.is_integer():
-        value = int(value)
-    return Quantity(value, kd.units)
-
-
-def as_quantity(kd: KeyData, train_ids: int | list[int] = None):
+def as_quantity(kd: KeyData, train_ids=None) -> xr.DataArray:
     if train_ids is None:
-        return as_single_value(kd)
+        train_ids = np.s_[:]
+    elif not isinstance(train_ids, by_index):
+        if isinstance(train_ids, int):
+            train_ids = [train_ids]
+        if not isinstance(train_ids, by_id):
+            train_ids = by_id[train_ids]
 
-    if isinstance(train_ids, int):
-        train_ids = [train_ids]
-    sel = kd[by_id[train_ids]]
+    data = kd[train_ids].xarray()
+    data.attrs['units'] = kd.units
+    return data
 
-    try:
-        value = sel.as_single_value()
-    except ValueError:
-        # value is changing, get all individual values
-        value = sel[by_id[train_ids]].ndarray()
-    return Quantity(value, kd.units)
+
+def dipole_ppu(run: DataCollection):
+    """ Get trainIds in run with dipole PPU open """
+    return run[
+        'HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN', 'hardwareStatusBitField'
+    ].xarray().where(lambda x: x == DipolePPU.OPEN.value, drop=True)
 
 
 class DIPOLE:
@@ -128,11 +90,15 @@ class DIPOLE:
         """
         meta = self.run.run_metadata()
         run_str = f'p{meta.get("proposalNumber", "?"):06}, r{meta.get("runNumber", "?"):04}'
-        # info_str = f'{self.name} properties for {run_str}:\n'
 
-        if compact or True:
+        if compact:
             return f'{self.name}, {run_str}'
-
+        
+        info_str = (
+            f'{self.name} properties for {run_str}:\n'
+            # TODO
+        )
+        return info_str
         # quantities = []
         # quantities.append(('Delay:', self.delay()))
         # quantities.append(('Energy:', self.energy()))
@@ -142,18 +108,13 @@ class DIPOLE:
         # info_str += '\n'.join([f'  {name:<{span}}{value:~.7g}' for name, value in quantities])
         # return info_str
 
-    def ppu(self):
-        return self.run[
-            'HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN', 'hardwareStatusBitField'
-        ].xarray().where(lambda x: x == DipolePPU.OPEN.value, drop=True)
-
-    def delay(self, train_ids: int | list[int] = None) -> PintQuantity:
+    def delay(self, train_ids=None):
         return as_quantity(self.run['APP_DIPOLE/MDL/DIPOLE_TIMING', 'actualPosition'], train_ids)
 
-    def energy(self, train_ids: int | list[int] = None) -> PintQuantity:
+    def energy(self, train_ids=None):
         return as_quantity(self.run['APP_DIPOLE/MDL/DIPOLE_DIAGNOSTIC', 'energy2W'], train_ids)
 
-    def trace(self, train_ids: int | list[int] = None, dt: float = 0.2) -> PintQuantity:
+    def trace(self, train_ids=None, dt: float = 0.2):
         """
         dt: float [ns/sample]
         """
@@ -195,46 +156,42 @@ class CalibrationData:
     def __getitem__(self, key):
         return self.config[key]
 
-    @cached_property
+    @property
     def dx(self):
         """Length per pixel in µm
         """
-        return Quantity(self['dx'], 'um')
+        return self['dx']
 
-    @cached_property
+    @property
     def dipole_zero(self):
         """Dipole position at 0 ns delay, 0 ns sweep delay
         """
-        pixel_offset = self['pixDipole_0ns'][f'{self.visar.sweep_time.m}ns']
+        pixel_offset = self['pixDipole_0ns'][f'{self.visar.sweep_time}ns']
         return self.timepoint(pixel_offset)
 
-    @cached_property
+    @property
     def fel_zero(self):
         """Xray position at 0 ns delay, 0 ns sweep delay
         """
         return self.timepoint(self['pixXray'])
 
+    @property
+    def reference_trigger_delay(self):
+        return self['positionTrigger_ref'][f'{self.visar.sweep_time}ns']
+
     @cached_property
     def timepoint(self):
         """Compute Time from pixel position in ns
         """
-        constants = self['timeAxisPolynomial'][f'{self.visar.sweep_time.m}ns']
+        constants = self['timeAxisPolynomial'][f'{self.visar.sweep_time}ns']
         # Pad with leading 0 because there is no intercept for the time axis
-        poly = np.poly1d(np.array([0, *constants])[::-1])
-        def _timepoint(data):
-            return Quantity(poly(data), 'ns')
-        return _timepoint
-
-    @cached_property
-    def reference_trigger_delay(self):
-        ref = self['positionTrigger_ref'][f'{self.visar.sweep_time.m}ns']
-        return Quantity(ref, 'ns')
+        return np.poly1d(np.array([0, *constants])[::-1])
 
     @cache
     def map(self) -> tuple[np.ndarray, np.ndarray]:
         """Return input and output transformation maps
         """
-        tr_map_file = self['transformationMaps'][f'{self.visar.sweep_time.m}ns']
+        tr_map_file = self['transformationMaps'][f'{self.visar.sweep_time}ns']
         file_path = Path(self['dirTransformationMaps']) / tr_map_file
         coords = np.loadtxt(file_path, delimiter=',')
         target = coords[..., 2:]
@@ -264,28 +221,35 @@ class _StreakCamera:
         self.dipole = dipole or DIPOLE(run)
         self.cal = CalibrationData(self, config_file)
 
+        self.dataset = xr.Dataset(coords=self.coords)
+
+    def process(self):
+        self.fel_delay()
+        self.sweep_delay()
+        self.sweep_time
+        self.image()
+        self._time_axis()
+        self._space_axis()
+
+        self.dataset.attrs = {
+            'dx': self.cal.dx,
+            'Dipole zero': self.cal.dipole_zero,
+            'FEL zero': self.cal.fel_zero,
+            'Ref. trigger delay': self.cal.reference_trigger_delay,
+            'maps': {st: m for st, m in zip(['source', 'target'], self.cal.map())},
+        }
+
+        # TODO add dipole data
+
     def __repr__(self):
         return f'<{type(self).__name__} {self.name}>'
 
-    def _quantity(self, kd: KeyData, train_ids=None) -> PintQuantity:
-        """Get values for shot train IDs
-        
-        If the quantity doesn't change over trains, this returns a single value,
-        else returns one value per train.
-        """
-        return as_quantity(kd, train_ids or self.shots())
-
-    def as_dict(self):
-        quantities = {}
-        for attr in sorted(dir(self)):
-            if attr.startswith('_'):
-                continue
-            q = getattr(self, attr)
-            if isinstance(q, Quantity):
-                quantities[attr] = q
-        quantities['train_ID_(shots)'] = self.shots()
-        quantities['train_ID_(ref.)'] = self.shots(reference=True)
-        return quantities
+    def _data(self, name: str, kd: KeyData) -> xr.DataArray:
+        if name not in self.dataset:
+            data = kd[self.train_ids].xarray()
+            data.attrs['units'] = kd.units
+            self.dataset[name] = data
+        return self.dataset[name]
 
     def info(self):
         """Print information about the VISAR component
@@ -302,110 +266,162 @@ class _StreakCamera:
         if compact:
             return f'{self.name}, {run_str}'
 
-        quantities = []
+        data = []
         for attr in sorted(dir(self)):
             if attr.startswith('_'):
                 continue
-            q = getattr(self, attr)
-            if isinstance(q, Quantity):
-                quantities.append((f'{attr.replace("_", " ").capitalize()}:', q))
+            if attr in ['plot', 'image', 'info', 'format', 'process']:
+                continue
+            
+            v = getattr(self, attr)
+            if not callable(v):
+                continue
 
-        span = len(max(quantities)[0]) + 1
-        info_str += '\n'.join([f'  {name:<{span}}{value:~.7g}' for name, value in quantities])
-        info_str += f'\n\n  Train ID (shots): {self.shots()}'
-        info_str += f'\n  Train ID (ref.): {self.shots(reference=True)}'
+            value = v()
+            units = value.attrs.get('units', '')
+            if len(np.unique(value)) == 1:
+                value = value.data[0]
+
+            data.append((f'{attr.replace("_", " ").capitalize()}:', value, units))
+
+        span = len(max(data)[0]) + 1
+        # TODO format multiple values
+        info_str += '\n'.join([f'  {name:<{span}}{value:.6g}{units}' for name, value, units in data])
+        info_str += f'\n\n  Train ID (shots): {self.coords.where(type=="shot", drop=True).trainId.data.tolist()}'
+        info_str += f'\n  Train ID (ref.): {self.coords.where(type=="reference", drop=True).trainId.data.tolist()}'
         return info_str
 
-    @cache
-    def sweep_delay(self, train_id=None) -> PintQuantity:
-        for key in ['actualDelay', 'actualPosition']:
-            if key in self.trigger:
-                return self._quantity(self.trigger[key], train_id) - self.cal.reference_trigger_delay
+    def fel_delay(self, _name='FEL delay'):
+        if _name not in self.dataset:
+            fel_delay = self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay(self.train_ids) - self.sweep_delay()
+            self.dataset[_name] = xr.DataArray(fel_delay, dims=['trainId'], attrs={'units': 'ns'})
+        return self.dataset[_name]
 
-    @cached_property
-    def sweep_time(self) -> PintQuantity:
-        return Quantity(self.ctrl.run_value('timeRange'))
+    def sweep_delay(self, _name="Sweep delay"):
+        if _name not in self.dataset:
+
+            for key in ['actualDelay', 'actualPosition']:
+                if key in self.trigger:
+                    break
+            else:
+                raise KeyError(f'sweep delay property not found in {self.trigger}')
+            
+            data = self.trigger[key][self.train_ids].xarray()
+            data.attrs['units'] = self.trigger[key].units
+            self.dataset[_name] = data - self.cal.reference_trigger_delay
+
+        return self.dataset[_name]
+
+    @property
+    def sweep_time(self, _name="Sweep time"):
+        """Sweep window in nanosecond
+
+        We assume the sweep time does not change over a run
+        """
+        if _name not in self.dataset:
+            sw, units = self.ctrl.run_value('timeRange').split(' ')
+            data = xr.DataArray(int(sw), attrs={'units': units})
+            self.dataset[_name] = data
+        return self.dataset[_name].data.tolist()
 
     @property
     def pixels(self):
         return self.detector['data.image.pixels']
 
-    @lru_cache()
-    def shots(self, reference=False):
+    @property
+    def train_ids(self):
+        # return self.coords.trainId.values
+        return by_id[self.coords.trainId.values]
+
+    @cached_property
+    def coords(self):
         """Get train IDs of data with open PPU.
 
-        If reference is True, return the first data with closed PPU instead.
+        The first trainID will be the first found train without signal
+        (reference signal) followed by all trains with detector data and PPU
+        opened.
         """
         # train ID with data in the run
         tids = self.pixels.drop_empty_trains().train_id_coordinates()
-        if tids.size == 0:
-            return  # there's not data in this run
 
+        # train ID with data and ppu open
         shot_ids = np.intersect1d(self.dipole.ppu().trainId, tids)
+        # train IDs with data and ppu closed
+        ref_ids = np.setdiff1d(tids, self.dipole.ppu().trainId)
 
-        if reference:
-            # return the first data point with closed ppu
-            for tid in tids:
-                if tid not in shot_ids:
-                    return np.array([tid], dtype=int)
-            else:
-                return  # no data with closed ppu
+        train_ids = shot_ids.tolist()
+        types = ['shot'] * len(train_ids)
 
-        if shot_ids.size == 0:
-            return  # no data with open ppu in this run
+        if ref_ids.size > 0:
+            insort(train_ids, ref_ids[0])
+            types.insert(train_ids.index(ref_ids[0]), 'reference')
 
-        return shot_ids.astype(int)
+        return xr.Dataset(
+            coords={
+                'trainId': np.array(train_ids, dtype=np.uint64),
+                'type': ('trainId', types),
+            })
 
-    @cache
-    def data(self, reference=False):
-        """Get corrected data
-        
+    def image(self, _name='image'):
+        """Get corrected images
+
         Returns corrected data for the trains with PPU opened. If *reference*
         is True, returns the first frame with PPU closed instead.
         """
-        if (tid := self.shots(reference=reference)) is None:
-            return
-        frames = self.pixels[by_id[tid]].ndarray()
-        corrected = np.array([rotate(frame) for frame in frames])
-        return corrected
-    
-    @cache
-    def fel_delay(self, train_id: int) -> PintQuantity:
-        return self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay(train_id) - self.sweep_delay(train_id)
+        if 'image' not in self.dataset:
+            data = self.pixels[self.train_ids].ndarray()
+            # SOP and 1w VISAR is 2x2 binned
+            # need to upscale it full size to use the time calibration
+            data = np.array([resize(frame) for frame in data])
+            data = np.rot90(data, 1, axes=(1, 2))
+            self.dataset['image'] = xr.DataArray(data, dims=['trainId', 'dim_0', 'dim_1'])
+        return self.dataset['image']
 
-    @cache
-    def _time_axis(self, train_id: int):
-        axis = self.cal.timepoint(np.arange(self.data().shape[-1]))
-        offset = self.cal.dipole_zero + self.dipole.delay(train_id) # - self.sweep_delay(train_id)
-        return axis - offset
+    def _time_axis(self, _name='Time axis'):
+        if _name not in self.dataset:
+            axis = self.cal.timepoint(np.arange(self.image().shape[-1]))
+            offset = self.cal.dipole_zero + self.dipole.delay(self.train_ids) - self.sweep_delay()
 
-    @cache
-    def _space_axis(self):
-        axis = np.arange(self.data().shape[-2]) * self.cal.dx
-        return axis - axis.mean()
+            data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0) - offset.data[:, None]
+            self.dataset[_name] = xr.DataArray(data, dims=['trainId', 'Time'], attrs={'units': 'ns'})
+        return self.dataset[_name]
+
+    def _space_axis(self, _name="Space axis"):
+        if _name not in self.dataset:
+            axis = np.arange(self.image().shape[-2]) * self.cal.dx
+            axis = axis - axis.mean()
+
+            data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
+            self.dataset[_name] = xr.DataArray(data, dims=['trainId', 'Space'], attrs={'units': 'um'})
+        return self.dataset[_name]
 
     def plot(self, train_id, ax=None):
-        shot_index = self.shots().tolist().index(train_id)
-        data = self.data()[shot_index]
+        ds = self.dataset.sel(trainId=train_id)
+        data = ds.image
+        type_ = ds.type.data.tolist()
 
-        time_axis = self._time_axis(train_id)
-        space_axis = self._space_axis()
+        time_axis = ds['Time axis']
+        space_axis = ds['Space axis']
+
+        # shot or reference index in the run
+        frames = self.dataset.where(self.dataset.type==type_, drop=True)
+        frame_index = frames.trainId.data.tolist().index(train_id)
 
         if ax is None:
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(9, 5))
 
-        tid_str = f'SHOT ({shot_index + 1}/{len(self.shots())}), tid:{train_id}'
+        tid_str = f'{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}'
         ax.set_title(f'{self.format(compact=True)}, {tid_str}')
-        ax.set_xlabel(f'Distance [{space_axis.u:~}]')
-        ax.set_ylabel(f'Time [{time_axis.u:~}]')
+        ax.set_xlabel(f'Distance [{space_axis.attrs.get("units", "?")}]')
+        ax.set_ylabel(f'Time [{time_axis.attrs.get("units", "?")}]')
 
-        extent = [time_axis.m[0], time_axis.m[-1], space_axis.m[0], space_axis.m[-1]]
+        extent = [time_axis[0], time_axis[-1], space_axis[0], space_axis[-1]]
         im = ax.imshow(data, extent=extent, cmap='jet', vmin=0, vmax=data.mean()+3*data.std())
         ax.vlines(
-            self.fel_delay(train_id),
-            ymin=space_axis.m[0],
-            ymax=space_axis.m[-1],
+            ds['FEL delay'],
+            ymin=space_axis[0],
+            ymax=space_axis[-1],
             linestyles='-',
             lw=2,
             color='purple',
@@ -413,8 +429,8 @@ class _StreakCamera:
         )
 
         ys, xs = np.where(data > 0)
-        ax.set_xlim(xmin=time_axis.m[xs.min()], xmax=time_axis.m[xs.max()])
-        ax.set_ylim(ymin=-space_axis.m[ys.max()], ymax=-space_axis.m[ys.min()])
+        ax.set_xlim(xmin=time_axis[xs.min()], xmax=time_axis[xs.max()])
+        ax.set_ylim(ymin=-space_axis[ys.max()], ymax=-space_axis[ys.min()])
         ax.set_aspect('auto')
 
         from matplotlib.ticker import MultipleLocator
@@ -430,141 +446,140 @@ class _StreakCamera:
 
         return ax
 
-    def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
-        """Save the data for this VISAR in HDF5
+    # def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
+    #     """Save the data for this VISAR in HDF5
 
-        output: str
-            The output directory to write the file
-        """
-        meta = self.run.run_metadata()
-        proposal = meta.get('proposalNumber', '')
-        run = meta.get('runNumber', '')
-        fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
-        with h5py.File(fpath, 'a') as fh:
-            visar = fh.create_group(self.name)
+    #     output: str
+    #         The output directory to write the file
+    #     """
+    #     meta = self.run.run_metadata()
+    #     proposal = meta.get('proposalNumber', '')
+    #     run = meta.get('runNumber', '')
+    #     fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
+    #     with h5py.File(fpath, 'a') as fh:
+    #         visar = fh.create_group(self.name)
 
-            ref = visar.create_group('Reference')
-            ref['Reference'] = self.data(reference=True)
-            ref['train ID'] = self.shots(reference=True)
+    #         ref = visar.create_group('Reference')
+    #         ref['Reference'] = self.data(reference=True)
+    #         ref['train ID'] = self.shots(reference=True)
 
-            shots = visar.create_group('Shots')
-            shots['Corrected images'] = self.data()
-            save_quantity(shots, "Time axis",
-                np.vstack([self._time_axis(tid) for tid in self.shots()]))
-            save_quantity(shots, "Space axis",
-                np.tile(self._space_axis(), (self.shots().size, 1)))
-            save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
-            save_quantity(shots, "Sweep window", self.sweep_time)
-            save_quantity(shots, "Sweep delay", self.sweep_delay())
-            save_quantity(shots, "Difference X-drive",
-                np.vstack([self.fel_delay(tid) for tid in self.shots()]))
-            shots["Train ID"] = self.shots()
+    #         shots = visar.create_group('Shots')
+    #         shots['Corrected images'] = self.data()
+    #         save_quantity(shots, "Time axis",
+    #             np.vstack([self._time_axis(tid) for tid in self.shots()]))
+    #         save_quantity(shots, "Space axis",
+    #             np.tile(self._space_axis(), (self.shots().size, 1)))
+    #         save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
+    #         save_quantity(shots, "Sweep window", self.sweep_time)
+    #         save_quantity(shots, "Sweep delay", self.sweep_delay())
+    #         save_quantity(shots, "Difference X-drive",
+    #             np.vstack([self.fel_delay(tid) for tid in self.shots()]))
+    #         shots["Train ID"] = self.shots()
 
-            if self.dipole.name not in fh:
-                dipole = fh.create_group(self.dipole.name)
-                save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
-                save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
-                # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
-                # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
+    #         if self.dipole.name not in fh:
+    #             dipole = fh.create_group(self.dipole.name)
+    #             save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
+    #             save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
+    #             # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
+    #             # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
 
 class _VISAR(_StreakCamera):
-    @cached_property
-    def zero_delay_position(self) -> PintQuantity:
-        return self._quantity(self.arm['zeroDelayPosition'])
+    def process(self):
+        super().process()
+        self.zero_delay_position()
+        self.etalon_thickness()
+        self.motor_displacement()
+        self.sensitivity()
+        self.temporal_delay()
 
-    @cached_property
-    def etalon_thickness(self) -> PintQuantity:
-        return self._quantity(self.arm['etalonThickness'])
+    def zero_delay_position(self, _name="Zero delay"):
+        return self._data(_name, self.arm['zeroDelayPosition'])
 
-    @cached_property
-    def motor_displacement(self) -> PintQuantity:
-        return self._quantity(self.arm['motorDisplacement'])
+    def etalon_thickness(self, _name="Etalon thickness"):
+        return self._data(_name, self.arm['etalonThickness'])
 
-    @cached_property
-    def sensitivity(self) -> PintQuantity:
-        return self._quantity(self.arm['sensitivity'])
+    def motor_displacement(self, _name="Motor displacement"):
+        return self._data(_name, self.arm['motorDisplacement'])
 
-    @cached_property
-    def temporal_delay(self) -> PintQuantity:
-        return self._quantity(self.arm['temporalDelay'])
+    def sensitivity(self, _name="Sensitivity"):
+        return self._data(_name, self.arm['sensitivity'])
+
+    def temporal_delay(self, _name="Temporal delay"):
+        return self._data(_name, self.arm['temporalDelay'])
     
-    def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
-        """Save the data for this VISAR in HDF5
+    # def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
+    #     """Save the data for this VISAR in HDF5
 
-        output: str
-            The output directory to write the file
-        """
-        meta = self.run.run_metadata()
-        proposal = meta.get('proposalNumber', '')
-        run = meta.get('runNumber', '')
-        fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
-        with h5py.File(fpath, 'a') as fh:
-            visar = fh.create_group(self.name)
+    #     output: str
+    #         The output directory to write the file
+    #     """
+    #     meta = self.run.run_metadata()
+    #     proposal = meta.get('proposalNumber', '')
+    #     run = meta.get('runNumber', '')
+    #     fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
+    #     with h5py.File(fpath, 'a') as fh:
+    #         visar = fh.create_group(self.name)
 
-            ref = visar.create_group('Reference')
-            ref['Reference'] = self.data(reference=True)
-            ref['train ID'] = self.shots(reference=True)
+    #         ref = visar.create_group('Reference')
+    #         ref['Reference'] = self.data(reference=True)
+    #         ref['train ID'] = self.shots(reference=True)
 
-            shots = visar.create_group('Shots')
-            shots['Corrected images'] = self.data()
-            save_quantity(shots, "Time axis",
-                np.vstack([self._time_axis(tid) for tid in self.shots()]))
-            save_quantity(shots, "Space axis",
-                np.tile(self._space_axis(), (self.shots().size, 1)))
-            save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
-            save_quantity(shots, "Sensitivity", self.sensitivity)
-            save_quantity(shots, "Etalon thickness", self.etalon_thickness)
-            save_quantity(shots, "Etalon delay", self.temporal_delay)
-            save_quantity(shots, "Sweep window", self.sweep_time)
-            save_quantity(shots, "Sweep delay", self.sweep_delay())
-            save_quantity(shots, "Difference X-drive",
-                np.vstack([self.fel_delay(tid) for tid in self.shots()]))
-            shots["Train ID"] = self.shots()
+    #         shots = visar.create_group('Shots')
+    #         shots['Corrected images'] = self.data()
+    #         save_quantity(shots, "Time axis",
+    #             np.vstack([self._time_axis(tid) for tid in self.shots()]))
+    #         save_quantity(shots, "Space axis",
+    #             np.tile(self._space_axis(), (self.shots().size, 1)))
+    #         save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
+    #         save_quantity(shots, "Sensitivity", self.sensitivity)
+    #         save_quantity(shots, "Etalon thickness", self.etalon_thickness)
+    #         save_quantity(shots, "Etalon delay", self.temporal_delay)
+    #         save_quantity(shots, "Sweep window", self.sweep_time)
+    #         save_quantity(shots, "Sweep delay", self.sweep_delay())
+    #         save_quantity(shots, "Difference X-drive",
+    #             np.vstack([self.fel_delay(tid) for tid in self.shots()]))
+    #         shots["Train ID"] = self.shots()
 
-            if self.dipole.name not in fh:
-                dipole = fh.create_group(self.dipole.name)
-                save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
-                save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
-                # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
-                # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
+    #         if self.dipole.name not in fh:
+    #             dipole = fh.create_group(self.dipole.name)
+    #             save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
+    #             save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
+    #             # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
+    #             # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
 
 class _KEPLER(_VISAR):
     SWEEP_SPEED = {1: 50, 2: 20, 3: 10, 4: 5, 5: 1, 6: 100}
 
     @cached_property
-    def sweep_time(self):
-        """Sweep window
+    def sweep_time(self, _name='Sweep time'):
+        """Sweep window in nanosecond
+
+        We assume the sweep time does not change over a run.
 
         Raise ValueError if the sweep speed changes over the run.
         """
-        ss = as_single_value(self.ctrl['sweepSpeed'])
-        return Quantity(self.SWEEP_SPEED[ss], 'ns')
+        if _name not in self.dataset:
+            ss = self.ctrl['sweepSpeed'].as_single_value()
+            st = self.SWEEP_SPEED[int(ss)]
+            self.dataset[_name] = xr.DataArray(st, attrs={'units': 'ns'})
+        return self.dataset[_name].data.tolist()
 
-    @lru_cache()
-    def data(self, reference=False):
-        if (tid := self.shots(reference=reference)) is None:
-            return
-        frames = self.pixels[by_id[tid]].ndarray()
-
-        corrected = np.array([
-            np.fliplr(remap(rotate(frame), *self.cal.map()))
-            for frame in frames
-        ])
-        return corrected
+    def image(self, _name='image'):
+        if _name not in self.dataset:
+            data = self.pixels[self.train_ids].ndarray()
+            data = np.rot90(data, 1, axes=(1, 2))
+            data = np.array([
+                np.fliplr(remap(frame, *self.cal.map()))
+                for frame in data
+            ])
+            self.dataset[_name] = xr.DataArray(data, dims=['trainId', 'dim_0', 'dim_1'])
+        return self.dataset[_name]
 
 
 class _VISAR_1w(_VISAR):
-    @lru_cache()
-    def data(self, reference=False):
-        # 1w VISAR is 2x2 binned
-        # need to upscale it full size to use the time calibration
-        if (tid := self.shots(reference=reference)) is None:
-            return
-        frames = self.pixels[by_id[tid]].ndarray()
-        corrected = np.array([rotate(resize(frame)) for frame in frames])
-        return corrected
+    ...
 
 
 def VISAR(run, name='KEPLER1', dipole=None, config_file=None):
