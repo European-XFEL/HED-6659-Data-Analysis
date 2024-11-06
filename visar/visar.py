@@ -1,6 +1,7 @@
 from bisect import insort
 from enum import Enum
 from functools import cache, cached_property, lru_cache
+from inspect import signature
 from pathlib import Path
 
 import cv2
@@ -16,24 +17,24 @@ VISAR_DEVICES = {
     'KEPLER1': {
         'arm': 'COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_1',
         'trigger': 'HED_EXP_VISAR/TSYS/ARM_1_TRIG',
-        'detector': 'HED_SYDOR_TEST/CAM/KEPLER_1:daqOutput',
+        'detector': ('HED_SYDOR_TEST/CAM/KEPLER_1:daqOutput', 'data.image.pixels'),
         'ctrl': 'HED_SYDOR_TEST/CTRL/CONTROL_UNIT_1',
     },
     'KEPLER2': {
         'arm': 'COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2',
         'trigger': 'HED_EXP_VISAR/TSYS/ARM_2_TRIG',
-        'detector': 'HED_SYDOR_TEST/CAM/KEPLER_2:daqOutput',
+        'detector': ('HED_SYDOR_TEST/CAM/KEPLER_2:daqOutput', 'data.image.pixels'),
         'ctrl': 'HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2',
     },
     'VISAR_1w': {
         'arm': 'COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_3',
         'trigger': 'HED_EXP_VISAR/TSYS/ARM_3_TRIG',
-        'detector': 'HED_EXP_VISAR/EXP/ARM_3_STREAK:daqOutput',
+        'detector': ('HED_EXP_VISAR/EXP/ARM_3_STREAK:daqOutput', 'data.image.pixels'),
         'ctrl': 'HED_EXP_VISAR/EXP/ARM_3_STREAK',
     },
     'SOP': {
         'trigger': 'HED_EXP_VISAR/TSYS/SOP_TRIG',
-        'detector': 'HED_EXP_VISAR/EXP/SOP_STREAK:daqOutput',
+        'detector': ('HED_EXP_VISAR/EXP/SOP_STREAK:daqOutput', 'data.image.pixels'),
         'ctrl': 'HED_EXP_VISAR/EXP/SOP_STREAK',
     },
 }
@@ -56,25 +57,11 @@ def resize(image, row_factor=2, column_factor=2):
     )
 
 
-def as_quantity(kd: KeyData, train_ids=None) -> xr.DataArray:
-    if train_ids is None:
-        train_ids = np.s_[:]
-    elif not isinstance(train_ids, by_index):
-        if isinstance(train_ids, int):
-            train_ids = [train_ids]
-        if not isinstance(train_ids, by_id):
-            train_ids = by_id[train_ids]
-
-    data = kd[train_ids].xarray()
-    data.attrs['units'] = kd.units
-    return data
-
-
-def dipole_ppu(run: DataCollection):
+def dipole_ppu_open(run: DataCollection):
     """ Get trainIds in run with dipole PPU open """
     return run[
         'HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN', 'hardwareStatusBitField'
-    ].xarray().where(lambda x: x == DipolePPU.OPEN.value, drop=True)
+    ].xarray().where(lambda x: x == DipolePPU.OPEN.value, drop=True).trainId
 
 
 class DIPOLE:
@@ -108,24 +95,25 @@ class DIPOLE:
         # info_str += '\n'.join([f'  {name:<{span}}{value:~.7g}' for name, value in quantities])
         # return info_str
 
-    def delay(self, train_ids=None):
-        return as_quantity(self.run['APP_DIPOLE/MDL/DIPOLE_TIMING', 'actualPosition'], train_ids)
+    def delay(self):
+        delay = self.run['APP_DIPOLE/MDL/DIPOLE_TIMING', 'actualPosition']
+        data = delay.xarray()
+        data.attrs['units'] = delay.units
+        return data
 
-    def energy(self, train_ids=None):
-        return as_quantity(self.run['APP_DIPOLE/MDL/DIPOLE_DIAGNOSTIC', 'energy2W'], train_ids)
+    def energy(self):
+        energy = self.run['APP_DIPOLE/MDL/DIPOLE_DIAGNOSTIC', 'energy2W']
+        data = energy.xarray()
+        data.attrs['units'] = energy.units
+        return data
 
-    def trace(self, train_ids=None, dt: float = 0.2):
+    def trace(self, dt: float = 0.2):
         """
         dt: float [ns/sample]
         """
         # TODO fix that function
-        if train_ids is None:
-            train_ids = self.run.train_ids
-        elif isinstance(train_ids, int):
-            train_ids = [train_ids]
 
-        traces = self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output', 'ch1.corrected']
-        traces = traces[by_id[train_ids]].ndarray()
+        traces = self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output', 'ch1.corrected'].ndarray()
 
         vmax = np.unique(traces[:, :40000], axis=1).max(axis=1)
 
@@ -136,7 +124,7 @@ class DIPOLE:
             time_axis.append((np.arange(idx[0] - 25, idx[-1] + 25) - idx[0]) * dt)
 
             dipole_duration = (idx[-1] - idx[0]) * dt * 1e-9
-            energy = self.energy(train_ids)
+            energy = self.energy()
             power_scaling = energy / (trace[idx[0]:idx[-1]].sum() * dipole_duration)
             power_trace.append(trace[idx[0]-25:idx[-1]+25] * power_scaling)
         return time_axis, power_trace
@@ -197,7 +185,7 @@ class CalibrationData:
         target = coords[..., 2:]
         source = coords[..., :2]
 
-        y, x = self.visar.pixels.entry_shape
+        y, x = self.visar.detector.entry_shape
         grid_1, grid_2 = np.mgrid[:y, :x]
         grid_z = griddata(target, source, (grid_1, grid_2), method='linear')
         map_1 = grid_z[..., 1].astype(np.float32)
@@ -207,18 +195,20 @@ class CalibrationData:
 
 
 class _StreakCamera:
-    def __init__(self, run, name='KEPLER1', dipole=None, config_file=None):
-        self.name = name
-        visar = VISAR_DEVICES[name]
-
+    def __init__(self, run, name, config_file=None):
         self.run = run
-        if 'arm' in visar:
-            self.arm = run[visar['arm']]
-        self.trigger = run[visar['trigger']]
-        self.detector = run[visar['detector']]
-        self.ctrl = run[visar['ctrl']]
+        self.name = name
+        self.visar = VISAR_DEVICES[name]
 
-        self.dipole = dipole or DIPOLE(run)
+        sel = run.select_trains(self.train_ids)
+
+        if 'arm' in self.visar:
+            self.arm = sel[self.visar['arm']]
+        self.trigger = sel[self.visar['trigger']]
+        self.detector = sel[self.visar['detector']]
+        self.ctrl = sel[self.visar['ctrl']]
+
+        self.dipole = DIPOLE(sel)
         self.cal = CalibrationData(self, config_file)
 
         self.dataset = xr.Dataset(coords=self.coords)
@@ -231,22 +221,27 @@ class _StreakCamera:
         self._time_axis()
         self._space_axis()
 
-        self.dataset.attrs = {
-            'dx': self.cal.dx,
-            'Dipole zero': self.cal.dipole_zero,
-            'FEL zero': self.cal.fel_zero,
-            'Ref. trigger delay': self.cal.reference_trigger_delay,
-            'maps': {st: m for st, m in zip(['source', 'target'], self.cal.map())},
-        }
+        # calibration data
+        # self.dataset['calibration/dx'] = self.cal.dx
+        # self.dataset['calibration/Dipole zero'] = self.cal.dipole_zero
+        # self.dataset['calibration/FEL zero'] = self.cal.fel_zero
+        # self.dataset['calibration/Reference trigger delay'] = self.cal.reference_trigger_delay
+        # self.dataset['calibration/map/source'] = (['dim_0', 'dim_1'], self.cal.map()[0])
+        # self.dataset['calibration/map/source'] = (['dim_0', 'dim_1'], self.cal.map()[1])
 
-        # TODO add dipole data
+        # add dipole data
+        self.dataset['Dipole delay'] = self.dipole.delay()
+        self.dataset['Dipole energy'] = self.dipole.energy()
+        # self.dataset['Dipole trace'] = self.dipole.trace()
+        # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
+        # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
     def __repr__(self):
         return f'<{type(self).__name__} {self.name}>'
 
     def _data(self, name: str, kd: KeyData) -> xr.DataArray:
         if name not in self.dataset:
-            data = kd[self.train_ids].xarray()
+            data = kd.xarray()
             data.attrs['units'] = kd.units
             self.dataset[name] = data
         return self.dataset[name]
@@ -267,33 +262,38 @@ class _StreakCamera:
             return f'{self.name}, {run_str}'
 
         data = []
-        for attr in sorted(dir(self)):
+        for attr in dir(self):
             if attr.startswith('_'):
                 continue
-            if attr in ['plot', 'image', 'info', 'format', 'process']:
+            if attr in ['image']:
                 continue
-            
+
             v = getattr(self, attr)
             if not callable(v):
+                continue
+            if '_name' not in signature(v).parameters:
                 continue
 
             value = v()
             units = value.attrs.get('units', '')
             if len(np.unique(value)) == 1:
-                value = value.data[0]
+                value = f'{value.data[0]:.6g}'
+            else:
+                value = ', '.join(f'{v:.6g}' for v in value)
 
             data.append((f'{attr.replace("_", " ").capitalize()}:', value, units))
+        data.append(("Sweep time:", f'{self.sweep_time:.6g}', 'ns'))
 
-        span = len(max(data)[0]) + 1
+        span = max(len(e[0]) for e in data) + 1
         # TODO format multiple values
-        info_str += '\n'.join([f'  {name:<{span}}{value:.6g}{units}' for name, value, units in data])
-        info_str += f'\n\n  Train ID (shots): {self.coords.where(type=="shot", drop=True).trainId.data.tolist()}'
-        info_str += f'\n  Train ID (ref.): {self.coords.where(type=="reference", drop=True).trainId.data.tolist()}'
+        info_str += '\n'.join([f'  {name:<{span}}{value} {units}' for name, value, units in data])
+        info_str += f'\n\n  Train ID (shots): {self.coords.where(self.coords.type=="shot", drop=True).trainId.data}'
+        info_str += f'\n  Train ID (ref.): {self.coords.where(self.coords.type=="reference", drop=True).trainId.data}'
         return info_str
 
     def fel_delay(self, _name='FEL delay'):
         if _name not in self.dataset:
-            fel_delay = self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay(self.train_ids) - self.sweep_delay()
+            fel_delay = self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay() - self.sweep_delay()
             self.dataset[_name] = xr.DataArray(fel_delay, dims=['trainId'], attrs={'units': 'ns'})
         return self.dataset[_name]
 
@@ -306,7 +306,7 @@ class _StreakCamera:
             else:
                 raise KeyError(f'sweep delay property not found in {self.trigger}')
             
-            data = self.trigger[key][self.train_ids].xarray()
+            data = self.trigger[key].xarray()
             data.attrs['units'] = self.trigger[key].units
             self.dataset[_name] = data - self.cal.reference_trigger_delay
 
@@ -325,10 +325,6 @@ class _StreakCamera:
         return self.dataset[_name].data.tolist()
 
     @property
-    def pixels(self):
-        return self.detector['data.image.pixels']
-
-    @property
     def train_ids(self):
         # return self.coords.trainId.values
         return by_id[self.coords.trainId.values]
@@ -342,12 +338,13 @@ class _StreakCamera:
         opened.
         """
         # train ID with data in the run
-        tids = self.pixels.drop_empty_trains().train_id_coordinates()
+        tids = self.run[self.visar['detector']].drop_empty_trains().train_id_coordinates()
+        ppu_open = dipole_ppu_open(self.run)
 
         # train ID with data and ppu open
-        shot_ids = np.intersect1d(self.dipole.ppu().trainId, tids)
+        shot_ids = np.intersect1d(ppu_open, tids)
         # train IDs with data and ppu closed
-        ref_ids = np.setdiff1d(tids, self.dipole.ppu().trainId)
+        ref_ids = np.setdiff1d(tids, ppu_open)
 
         train_ids = shot_ids.tolist()
         types = ['shot'] * len(train_ids)
@@ -362,25 +359,26 @@ class _StreakCamera:
                 'type': ('trainId', types),
             })
 
+    @cache
     def image(self, _name='image'):
         """Get corrected images
 
         Returns corrected data for the trains with PPU opened. If *reference*
         is True, returns the first frame with PPU closed instead.
         """
-        if 'image' not in self.dataset:
-            data = self.pixels[self.train_ids].ndarray()
+        if _name not in self.dataset:
+            data = self.detector.ndarray()
             # SOP and 1w VISAR is 2x2 binned
             # need to upscale it full size to use the time calibration
             data = np.array([resize(frame) for frame in data])
             data = np.rot90(data, 1, axes=(1, 2))
-            self.dataset['image'] = xr.DataArray(data, dims=['trainId', 'dim_0', 'dim_1'])
-        return self.dataset['image']
+            self.dataset[_name] = xr.DataArray(data, dims=['trainId', 'dim_0', 'dim_1'])
+        return self.dataset[_name]
 
     def _time_axis(self, _name='Time axis'):
         if _name not in self.dataset:
             axis = self.cal.timepoint(np.arange(self.image().shape[-1]))
-            offset = self.cal.dipole_zero + self.dipole.delay(self.train_ids) - self.sweep_delay()
+            offset = self.cal.dipole_zero + self.dipole.delay() - self.sweep_delay()
 
             data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0) - offset.data[:, None]
             self.dataset[_name] = xr.DataArray(data, dims=['trainId', 'Time'], attrs={'units': 'ns'})
@@ -445,6 +443,15 @@ class _StreakCamera:
         fig.tight_layout()
 
         return ax
+
+    def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
+        self.process()
+        meta = self.run.run_metadata()
+        proposal = meta.get('proposalNumber', '')
+        run = meta.get('runNumber', '')
+        fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
+
+        self.dataset.to_netcdf(path=fpath, mode='a', group=self.name, format='NETCDF4', engine='h5netcdf')
 
     # def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
     #     """Save the data for this VISAR in HDF5
@@ -552,7 +559,7 @@ class _VISAR(_StreakCamera):
 class _KEPLER(_VISAR):
     SWEEP_SPEED = {1: 50, 2: 20, 3: 10, 4: 5, 5: 1, 6: 100}
 
-    @cached_property
+    @property
     def sweep_time(self, _name='Sweep time'):
         """Sweep window in nanosecond
 
@@ -566,9 +573,10 @@ class _KEPLER(_VISAR):
             self.dataset[_name] = xr.DataArray(st, attrs={'units': 'ns'})
         return self.dataset[_name].data.tolist()
 
+    @cache
     def image(self, _name='image'):
         if _name not in self.dataset:
-            data = self.pixels[self.train_ids].ndarray()
+            data = self.detector.ndarray()
             data = np.rot90(data, 1, axes=(1, 2))
             data = np.array([
                 np.fliplr(remap(frame, *self.cal.map()))
@@ -582,7 +590,7 @@ class _VISAR_1w(_VISAR):
     ...
 
 
-def VISAR(run, name='KEPLER1', dipole=None, config_file=None):
+def VISAR(run, name='KEPLER1', config_file=None):
     if name == 'SOP':
         _V = _StreakCamera
     elif name == 'VISAR_1w':
@@ -591,7 +599,7 @@ def VISAR(run, name='KEPLER1', dipole=None, config_file=None):
         _V = _KEPLER
     else:
         raise ValueError(f'name must be one of {", ".join(VISAR_DEVICES)}')
-    return _V(run, name=name, dipole=dipole, config_file=config_file)
+    return _V(run, name=name, config_file=config_file)
 
 
 if __name__ == '__main__':
