@@ -47,3 +47,16 @@ positionTrigger_ref.50ns = 58911854.11115384  # run['HED_EXP_VISAR/TSYS/ARM_2_TR
 timeAxisPolynomial.20ns = [1.928e-2, 4.442e-7, 2.666e-10]
 timeAxisPolynomial.10ns = [1.058e-2, -1.162e-6, 0.463e-9]
 timeAxisPolynomial.50ns = [5.153e-2, -3.274e-6, 1.816e-9]
+
+[SOP]
+dx = 0.4                                      # µm/pixel
+pixDipole_0ns.20ns = 226.0                   # FAKE VALUES FOR DEBUGGIN -- Dipole pixel position at 0 ns delay, 0 ns sweep delay, 20 ns sweep window -- r57
+pixDipole_0ns.10ns = 250.0                   # FAKE VALUES FOR DEBUGGIN -- Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r67
+pixDipole_0ns.50ns = 155.0                   # FAKE VALUES FOR DEBUGGIN -- Dipole pixel position at 0 ns delay, 0 ns sweep delay, 10 ns sweep window -- r62
+pixXray = 217.0                              # Xray pixel position at 0 ns delay, 0 ns sweep delay -- r55-56 (very weak change -- might need to refine)
+positionTrigger_ref.20ns = 58911996.99807692  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r57
+positionTrigger_ref.10ns = 58911978.25346153  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r67
+positionTrigger_ref.50ns = 58911854.11115384  # run['HED_EXP_VISAR/TSYS/ARM_2_TRIG', 'actualPosition'].ndarray() -- r62
+timeAxisPolynomial.20ns = [1.928e-2, 4.442e-7, 2.666e-10]
+timeAxisPolynomial.10ns = [1.058e-2, -1.162e-6, 0.463e-9]
+timeAxisPolynomial.50ns = [5.153e-2, -3.274e-6, 1.816e-9]

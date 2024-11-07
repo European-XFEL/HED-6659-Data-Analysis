@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hed_6659"
+description = "Data Analysis for experiment 6659"
+requires-python = ">=3.10"
+dynamic = ["version"]
+readme = "README.md"
+dependencies = [
+    "extra-data",
+    "fabio",
+    "h5py",
+    "numpy",
+    "opencv-contrib-python",
+    "pyFAI",
+    "scipy",
+    "toml",
+    "xarray",
+]
+
+[project.optional-dependencies]
+dev = [
+    "isort",
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"

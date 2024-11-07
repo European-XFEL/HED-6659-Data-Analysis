@@ -1,3 +1,9 @@
+""" VISAR correction
+
+Code to correct image deformation for the KEPLER (and others) streak cameras
+used for the VISAR device at the HED instrument at European XFEL.
+"""
+
 from bisect import insort
 from enum import Enum
 from functools import cache, cached_property, wraps
@@ -12,6 +18,8 @@ import toml
 import xarray as xr
 from extra_data import DataCollection, KeyData, by_id
 from scipy.interpolate import griddata
+
+__all__ = ['VISAR']
 
 VISAR_DEVICES = {
     "KEPLER1": {
