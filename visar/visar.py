@@ -5,11 +5,10 @@ from inspect import signature
 from pathlib import Path
 
 import cv2
-import h5py
 import numpy as np
 import toml
 import xarray as xr
-from extra_data import by_id, by_index, KeyData, DataCollection
+from extra_data import by_id, KeyData, DataCollection
 from scipy.interpolate import griddata
 
 
@@ -65,7 +64,8 @@ def dipole_ppu_open(run: DataCollection):
 
 
 class DIPOLE:
-    def __init__(self, run, name='DIPOLE'):
+    def __init__(self, visar, run, name='DIPOLE'):
+        self.visar = visar
         self.name = name
         self.run = run
 
@@ -94,6 +94,27 @@ class DIPOLE:
         # span = len(max(quantities)[0]) + 1
         # info_str += '\n'.join([f'  {name:<{span}}{value:~.7g}' for name, value in quantities])
         # return info_str
+
+    def save(self, file_path):
+        self.dataset().to_netcdf(
+            path=file_path, 
+            mode='a',
+            group=f'{self.visar.name}/dipole',
+            format='NETCDF4',
+            engine='h5netcdf'
+        )
+
+    @cache
+    def dataset(self):
+        return xr.Dataset(
+            data_vars={
+                "Delay": self.delay(),
+                "Energy": self.energy(),
+                #TODO add trace information
+                # "profile", self.dipole.profile(self.shots()))  # TODO
+                # "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
+            }
+        )
 
     def delay(self):
         delay = self.run['APP_DIPOLE/MDL/DIPOLE_TIMING', 'actualPosition']
@@ -192,6 +213,28 @@ class CalibrationData:
         map_2 = grid_z[..., 0].astype(np.float32)
 
         return map_1, map_2
+    
+    @cache
+    def dataset(self):
+        return xr.Dataset(
+            data_vars={
+                "dx": xr.DataArray(self.dx, attrs={'units': 'um'}),
+                "Drive pixel t0": xr.DataArray(self.dipole_zero, attrs={'units': 'ns'}),
+                "FEL zero": xr.DataArray(self.fel_zero, attrs={'units': 'ns'}),
+                "Reference trigger delay": xr.DataArray(self.reference_trigger_delay, attrs={'units': 'ns'}),
+                "Dewarp source": (["dim_0", "dim_1"], self.map()[0]),
+                "Dewarp target": (["dim_0", "dim_1"], self.map()[1]),
+            }
+        )
+
+    def save(self, file_path):
+        self.dataset().to_netcdf(
+            path=file_path, 
+            mode='a',
+            group=f'{self.visar.name}/calibration',
+            format='NETCDF4',
+            engine='h5netcdf'
+        )
 
 
 class _StreakCamera:
@@ -208,33 +251,40 @@ class _StreakCamera:
         self.detector = sel[self.visar['detector']]
         self.ctrl = sel[self.visar['ctrl']]
 
-        self.dipole = DIPOLE(sel)
+        self.dipole = DIPOLE(self, sel)
         self.cal = CalibrationData(self, config_file)
 
         self.dataset = xr.Dataset(coords=self.coords)
 
     def process(self):
-        self.fel_delay()
-        self.sweep_delay()
+        import time
+
+        t0 = time.perf_counter()
         self.sweep_time
-        self.image()
-        self._time_axis()
-        self._space_axis()
+        print(f'sweep time: {round((time.perf_counter()-t0)*1000, 3)}ms')
+
+        for name in dir(self):
+            if name.startswith('__'):
+                continue
+            
+            t0 = time.perf_counter()
+            attr = getattr(self, name)
+            t1 = time.perf_counter()
+            if not callable(attr):
+                continue
+
+            if '_name' in signature(attr).parameters:
+                attr()
+                t2 = time.perf_counter()
+                print(f'{name}: getattr:{round((t1-t0)*1000, 3)}ms - execute:{round((t2-t1)*1000, 3)}ms')
+            else:
+                print(f'{name}: getattr:{round((t1-t0)*1000, 3)}ms')
 
         # calibration data
-        # self.dataset['calibration/dx'] = self.cal.dx
-        # self.dataset['calibration/Dipole zero'] = self.cal.dipole_zero
-        # self.dataset['calibration/FEL zero'] = self.cal.fel_zero
-        # self.dataset['calibration/Reference trigger delay'] = self.cal.reference_trigger_delay
-        # self.dataset['calibration/map/source'] = (['dim_0', 'dim_1'], self.cal.map()[0])
-        # self.dataset['calibration/map/source'] = (['dim_0', 'dim_1'], self.cal.map()[1])
+        self.cal.dataset()
 
         # add dipole data
-        self.dataset['Dipole delay'] = self.dipole.delay()
-        self.dataset['Dipole energy'] = self.dipole.energy()
-        # self.dataset['Dipole trace'] = self.dipole.trace()
-        # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
-        # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
+        self.dipole.dataset()
 
     def __repr__(self):
         return f'<{type(self).__name__} {self.name}>'
@@ -271,7 +321,9 @@ class _StreakCamera:
             v = getattr(self, attr)
             if not callable(v):
                 continue
-            if '_name' not in signature(v).parameters:
+
+            args =  signature(v).parameters
+            if '_name' not in args:
                 continue
 
             value = v()
@@ -281,17 +333,17 @@ class _StreakCamera:
             else:
                 value = ', '.join(f'{v:.6g}' for v in value)
 
-            data.append((f'{attr.replace("_", " ").capitalize()}:', value, units))
+            data.append((f'{args["_name"].default}:', value, units))
         data.append(("Sweep time:", f'{self.sweep_time:.6g}', 'ns'))
 
         span = max(len(e[0]) for e in data) + 1
         # TODO format multiple values
-        info_str += '\n'.join([f'  {name:<{span}}{value} {units}' for name, value, units in data])
+        info_str += '\n'.join([f'  {name:<{span}}{value} {units}' for name, value, units in sorted(data)])
         info_str += f'\n\n  Train ID (shots): {self.coords.where(self.coords.type=="shot", drop=True).trainId.data}'
         info_str += f'\n  Train ID (ref.): {self.coords.where(self.coords.type=="reference", drop=True).trainId.data}'
         return info_str
 
-    def fel_delay(self, _name='FEL delay'):
+    def fel_delay(self, _name='Difference X-drive'):
         if _name not in self.dataset:
             fel_delay = self.cal.fel_zero - self.cal.dipole_zero - self.dipole.delay() - self.sweep_delay()
             self.dataset[_name] = xr.DataArray(fel_delay, dims=['trainId'], attrs={'units': 'ns'})
@@ -417,7 +469,7 @@ class _StreakCamera:
         extent = [time_axis[0], time_axis[-1], space_axis[0], space_axis[-1]]
         im = ax.imshow(data, extent=extent, cmap='jet', vmin=0, vmax=data.mean()+3*data.std())
         ax.vlines(
-            ds['FEL delay'],
+            ds['Difference X-drive'],  # fel_delay
             ymin=space_axis[0],
             ymax=space_axis[-1],
             linestyles='-',
@@ -452,54 +504,11 @@ class _StreakCamera:
         fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
 
         self.dataset.to_netcdf(path=fpath, mode='a', group=self.name, format='NETCDF4', engine='h5netcdf')
-
-    # def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
-    #     """Save the data for this VISAR in HDF5
-
-    #     output: str
-    #         The output directory to write the file
-    #     """
-    #     meta = self.run.run_metadata()
-    #     proposal = meta.get('proposalNumber', '')
-    #     run = meta.get('runNumber', '')
-    #     fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
-    #     with h5py.File(fpath, 'a') as fh:
-    #         visar = fh.create_group(self.name)
-
-    #         ref = visar.create_group('Reference')
-    #         ref['Reference'] = self.data(reference=True)
-    #         ref['train ID'] = self.shots(reference=True)
-
-    #         shots = visar.create_group('Shots')
-    #         shots['Corrected images'] = self.data()
-    #         save_quantity(shots, "Time axis",
-    #             np.vstack([self._time_axis(tid) for tid in self.shots()]))
-    #         save_quantity(shots, "Space axis",
-    #             np.tile(self._space_axis(), (self.shots().size, 1)))
-    #         save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
-    #         save_quantity(shots, "Sweep window", self.sweep_time)
-    #         save_quantity(shots, "Sweep delay", self.sweep_delay())
-    #         save_quantity(shots, "Difference X-drive",
-    #             np.vstack([self.fel_delay(tid) for tid in self.shots()]))
-    #         shots["Train ID"] = self.shots()
-
-    #         if self.dipole.name not in fh:
-    #             dipole = fh.create_group(self.dipole.name)
-    #             save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
-    #             save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
-    #             # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
-    #             # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
+        self.cal.save(fpath)
+        self.dipole.save(fpath)
 
 
 class _VISAR(_StreakCamera):
-    def process(self):
-        super().process()
-        self.zero_delay_position()
-        self.etalon_thickness()
-        self.motor_displacement()
-        self.sensitivity()
-        self.temporal_delay()
-
     def zero_delay_position(self, _name="Zero delay"):
         return self._data(_name, self.arm['zeroDelayPosition'])
 
@@ -514,46 +523,6 @@ class _VISAR(_StreakCamera):
 
     def temporal_delay(self, _name="Temporal delay"):
         return self._data(_name, self.arm['temporalDelay'])
-    
-    # def save(self, output='.', filename='VISAR_p{proposal:06}_r{run:04}.h5'):
-    #     """Save the data for this VISAR in HDF5
-
-    #     output: str
-    #         The output directory to write the file
-    #     """
-    #     meta = self.run.run_metadata()
-    #     proposal = meta.get('proposalNumber', '')
-    #     run = meta.get('runNumber', '')
-    #     fpath = f'{output}/{filename.format(proposal=proposal, run=run)}'
-    #     with h5py.File(fpath, 'a') as fh:
-    #         visar = fh.create_group(self.name)
-
-    #         ref = visar.create_group('Reference')
-    #         ref['Reference'] = self.data(reference=True)
-    #         ref['train ID'] = self.shots(reference=True)
-
-    #         shots = visar.create_group('Shots')
-    #         shots['Corrected images'] = self.data()
-    #         save_quantity(shots, "Time axis",
-    #             np.vstack([self._time_axis(tid) for tid in self.shots()]))
-    #         save_quantity(shots, "Space axis",
-    #             np.tile(self._space_axis(), (self.shots().size, 1)))
-    #         save_quantity(shots, "Drive pixel t0", self.cal.dipole_zero)
-    #         save_quantity(shots, "Sensitivity", self.sensitivity)
-    #         save_quantity(shots, "Etalon thickness", self.etalon_thickness)
-    #         save_quantity(shots, "Etalon delay", self.temporal_delay)
-    #         save_quantity(shots, "Sweep window", self.sweep_time)
-    #         save_quantity(shots, "Sweep delay", self.sweep_delay())
-    #         save_quantity(shots, "Difference X-drive",
-    #             np.vstack([self.fel_delay(tid) for tid in self.shots()]))
-    #         shots["Train ID"] = self.shots()
-
-    #         if self.dipole.name not in fh:
-    #             dipole = fh.create_group(self.dipole.name)
-    #             save_quantity(dipole, "Energy", self.dipole.energy(self.shots()))
-    #             save_quantity(dipole, "Delay", self.dipole.delay(self.shots()))
-    #             # save_quantity(dipole, "profile", self.dipole.profile(self.shots()))  # TODO
-    #             # save_quantity(dipole, "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
 
 
 class _KEPLER(_VISAR):
@@ -587,7 +556,7 @@ class _KEPLER(_VISAR):
 
 
 class _VISAR_1w(_VISAR):
-    ...
+    pass
 
 
 def VISAR(run, name='KEPLER1', config_file=None):
@@ -608,10 +577,8 @@ if __name__ == '__main__':
     r = open_run(6656, 22)
     config = '/gpfs/exfel/data/user/tmichela/tmp/visar_calibration_values_6656.toml'
 
-    dipole = DIPOLE(r)
-
     for v in VISAR_DEVICES:
-        vis = VISAR(r, name=v, dipole=dipole, config_file=config)
+        vis = VISAR(r, name=v, config_file=config)
         vis.info()
 
         for train_id in vis.shots():
