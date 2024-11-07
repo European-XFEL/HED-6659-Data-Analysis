@@ -1,7 +1,8 @@
 from bisect import insort
 from enum import Enum
 from functools import cache, cached_property, wraps
-from inspect import signature, getmembers, ismethod
+from inspect import getmembers, ismethod
+from math import ceil
 from pathlib import Path
 from time import perf_counter
 
@@ -183,7 +184,7 @@ class DIPOLE(SaveFriend):
         )
         return info_str
 
-    @_cache(name="delay")
+    @_cache(name="Delay")
     def delay(self):
         delay = self.run["APP_DIPOLE/MDL/DIPOLE_TIMING", "actualPosition"]
         data = delay.xarray()
@@ -567,7 +568,6 @@ class _StreakCamera(SaveFriend):
         self.compute()
         n_images = len(self.train_ids.value)
 
-        from math import ceil
         import matplotlib.pyplot as plt
         rows = ceil(n_images / plots_per_row)
         cols = min(n_images, plots_per_row)
