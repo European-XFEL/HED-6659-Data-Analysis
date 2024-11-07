@@ -493,7 +493,7 @@ class _StreakCamera(SaveFriend):
             data, dims=["trainId", "Space"], attrs={"units": "um"}
         )
 
-    def plot(self, train_id, ax=None):
+    def plot(self, train_id, ax=None, fig=None):
         self.compute()
         ds = self.dataset.sel(trainId=train_id)
         data = ds.image
@@ -508,7 +508,6 @@ class _StreakCamera(SaveFriend):
 
         if ax is None:
             import matplotlib.pyplot as plt
-
             fig, ax = plt.subplots(figsize=(9, 5))
 
         tid_str = f"{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}"
@@ -545,7 +544,7 @@ class _StreakCamera(SaveFriend):
         ax.grid(which="minor", color="k", linestyle=":", linewidth=1, alpha=1)
 
         fig.colorbar(im, ax=ax)
-        fig.tight_layout()
+        # fig.tight_layout()
 
         return ax
 
@@ -558,6 +557,35 @@ class _StreakCamera(SaveFriend):
         super().save(fpath, self.name)
         self.cal.save(fpath)
         self.dipole.save(fpath, f'{self.name}/dipole')
+
+    def to_png(self, output='.', filename="p{proposal:06}_r{run:04}_{name}.png", plots_per_row=1):
+        meta = self.run.run_metadata()
+        proposal = meta.get("proposalNumber", "")
+        run = meta.get("runNumber", "")
+        fpath = f"{output}/{filename.format(name=self.name, proposal=proposal, run=run)}"
+
+        self.compute()
+        n_images = len(self.train_ids.value)
+
+        from math import ceil
+        import matplotlib.pyplot as plt
+        rows = ceil(n_images / plots_per_row)
+        cols = min(n_images, plots_per_row)
+
+        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 3 * rows))
+        fig.subplots_adjust(hspace=0.4, wspace=0.4)
+
+        # Flatten axes for easy indexing, even if there's only one row or column
+        axes = axes.flatten() if isinstance(axes, (list, np.ndarray)) else [axes]
+
+        for tid, ax in zip(self.train_ids.value, axes):
+            self.plot(tid, ax, fig)
+
+        # Turn off any unused subplots
+        for i in range(n_images, len(axes)):
+            axes[i].axis('off')
+
+        fig.savefig(fpath, bbox_inches='tight', format='png')
 
 
 class _VISAR(_StreakCamera):
