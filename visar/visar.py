@@ -8,9 +8,8 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from extra_data import by_id, KeyData, DataCollection
+from extra_data import DataCollection, KeyData, by_id
 from scipy.interpolate import griddata
-
 
 VISAR_DEVICES = {
     'KEPLER1': {
