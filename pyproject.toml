@@ -12,6 +12,7 @@ dependencies = [
     "extra-data",
     "fabio",
     "h5py",
+    "matplotlib",
     "numpy",
     "opencv-contrib-python",
     "pyFAI",
