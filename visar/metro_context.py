@@ -6,10 +6,9 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from scipy.interpolate import griddata
-
 from metropc.context import View, ViewGroup
 from metropc.viewdef import Parameter
+from scipy.interpolate import griddata
 
 
 def remove_border(data, value=0., ratio=1):

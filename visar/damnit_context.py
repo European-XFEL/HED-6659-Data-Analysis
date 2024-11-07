@@ -1,5 +1,5 @@
 import numpy as np
-from damnit_ctx import Variable, Cell
+from damnit_ctx import Cell, Variable
 
 from visar import VISAR
 
