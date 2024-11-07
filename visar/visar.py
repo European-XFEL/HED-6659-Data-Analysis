@@ -3,6 +3,7 @@ from enum import Enum
 from functools import cache, cached_property, wraps
 from inspect import signature, getmembers, ismethod
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -82,11 +83,70 @@ def format_train_ids(data):
     return out
 
 
-class DIPOLE:
-    def __init__(self, visar, run, name="DIPOLE"):
+def _cache(name, py_type=False):
+    """Decorator to cache the result of a method in the (xarray) dataset.
+
+    Parameters:
+    - name (str): The name under which the result will be cached in the dataset.
+    - py_type (bool): If True, the cached result will be converted to a Python type.
+
+    The decorator checks if the result for the given name is already cached in the dataset.
+    If not, it calls the decorated function to compute the result, caches it, and then returns it.
+    If py_type is True, the result is converted to a python type before returning.
+
+    note: the class must have a dataset object of type xarray.Dataset defined.
+    """
+    def decorator(func):
+        @wraps(func)
+        def inner(self, *args, **kwargs):
+            if name not in self.dataset:
+                data = func(self, *args, **kwargs)
+                self.dataset[name] = data
+            
+            res = self.dataset[name]
+            if py_type:
+                return res.data.tolist()
+            return res
+
+        inner._is_cached = True
+
+        return inner
+    return decorator
+
+
+class SaveFriend:
+    """ functions to compute cached data and save Dataset to hdf5
+    
+    The main class must define a dataset object.
+    """
+    def _quantities(self):
+        """Return a list of all cache-able methods"""
+        methods = getmembers(self, predicate=ismethod)
+        return [
+            (name, method) for name, method in methods
+            if getattr(method, '_is_cached', False)
+        ]
+
+    def compute(self, profile=False):
+        for name, quantity in self._quantities():
+            t0 = perf_counter()
+            quantity()
+            if profile:
+                print(f"{name}: {round((perf_counter()-t0)*1000, 3)}ms")
+
+    def save(self, path, group):
+        self.compute()
+        self.dataset.to_netcdf(
+            path=path, mode="a", group=group, format="NETCDF4", engine="h5netcdf"
+        )
+
+
+class DIPOLE(SaveFriend):
+    def __init__(self, visar, run, name="DiPOLE"):
         self.visar = visar
         self.name = name
         self.run = run
+        self.dataset = xr.Dataset(coords=visar.coords)
 
     def info(self):
         print(self.format())
@@ -101,47 +161,36 @@ class DIPOLE:
         if compact:
             return f"{self.name}, {run_str}"
 
-        info_str = (
-            f"{self.name} properties for {run_str}:\n"
-            # TODO
+        info_str = f"{self.name} properties for {run_str}:\n"
+        data = []
+        for name, quantity in self._quantities():
+            if name.startswith('_'):
+                continue
+            value = quantity()
+            name = value.name
+            units = value.attrs.get("units", "")
+            # only show a single value if it's not changing
+            if len(np.unique(value)) == 1:
+                value = f"{value.data[0]:.6g}"
+            else:
+                with np.printoptions(precision=3):
+                    value = str(value.data)
+            data.append((f'{name}:', value, units))
+
+        span = max(len(e[0]) for e in data) + 1
+        info_str += "\n".join(
+            [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
         return info_str
-        # quantities = []
-        # quantities.append(('Delay:', self.delay()))
-        # quantities.append(('Energy:', self.energy()))
-        # # quantities.append(('Trace:', self.trace()))
 
-        # span = len(max(quantities)[0]) + 1
-        # info_str += '\n'.join([f'  {name:<{span}}{value:~.7g}' for name, value in quantities])
-        # return info_str
-
-    def save(self, file_path):
-        self.dataset().to_netcdf(
-            path=file_path,
-            mode="a",
-            group=f"{self.visar.name}/dipole",
-            format="NETCDF4",
-            engine="h5netcdf",
-        )
-
-    @cache
-    def dataset(self):
-        return xr.Dataset(
-            data_vars={
-                "Delay": self.delay(),
-                "Energy": self.energy(),
-                # TODO add trace information
-                # "profile", self.dipole.profile(self.shots()))  # TODO
-                # "profile time axis", self.dipole.profile_axis(self.shots()))  # TODO
-            }
-        )
-
+    @_cache(name="delay")
     def delay(self):
         delay = self.run["APP_DIPOLE/MDL/DIPOLE_TIMING", "actualPosition"]
         data = delay.xarray()
         data.attrs["units"] = delay.units
         return data
 
+    @_cache(name="Energy")
     def energy(self):
         energy = self.run["APP_DIPOLE/MDL/DIPOLE_DIAGNOSTIC", "energy2W"]
         data = energy.xarray()
@@ -217,7 +266,11 @@ class CalibrationData:
     @cache
     def map(self) -> tuple[np.ndarray, np.ndarray]:
         """Return input and output transformation maps"""
-        tr_map_file = self["transformationMaps"][f"{self.visar.sweep_time()}ns"]
+        try:
+            tr_map_file = self["transformationMaps"][f"{self.visar.sweep_time()}ns"]
+        except KeyError:
+            return None  # no maps for this detector
+
         file_path = Path(self["dirTransformationMaps"]) / tr_map_file
         coords = np.loadtxt(file_path, delimiter=",")
         target = coords[..., 2:]
@@ -233,7 +286,7 @@ class CalibrationData:
 
     @cache
     def dataset(self):
-        return xr.Dataset(
+        data = xr.Dataset(
             data_vars={
                 "dx": xr.DataArray(self.dx, attrs={"units": "um"}),
                 "Drive pixel t0": xr.DataArray(self.dipole_zero, attrs={"units": "ns"}),
@@ -241,10 +294,11 @@ class CalibrationData:
                 "Reference trigger delay": xr.DataArray(
                     self.reference_trigger_delay, attrs={"units": "ns"}
                 ),
-                "Dewarp source": (["dim_0", "dim_1"], self.map()[0]),
-                "Dewarp target": (["dim_0", "dim_1"], self.map()[1]),
-            }
-        )
+        })
+        if self.map() is not None:
+            data["Dewarp source"] = (["dim_0", "dim_1"], self.map()[0])
+            data["Dewarp target"] = (["dim_0", "dim_1"], self.map()[1])
+        return data
 
     def save(self, file_path):
         self.dataset().to_netcdf(
@@ -256,38 +310,7 @@ class CalibrationData:
         )
 
 
-def _cache(name, py_type=False):
-    """Decorator to cache the result of a method in the (xarray) dataset.
-
-    Parameters:
-    - name (str): The name under which the result will be cached in the dataset.
-    - py_type (bool): If True, the cached result will be converted to a Python type.
-
-    The decorator checks if the result for the given name is already cached in the dataset.
-    If not, it calls the decorated function to compute the result, caches it, and then returns it.
-    If py_type is True, the result is converted to a python type before returning.
-
-    note: the class must have a dataset object of type xarray.Dataset defined.
-    """
-    def decorator(func):
-        @wraps(func)
-        def inner(self, *args, **kwargs):
-            if name not in self.dataset:
-                data = func(self, *args, **kwargs)
-                self.dataset[name] = data
-            
-            res = self.dataset[name]
-            if py_type:
-                return res.data.tolist()
-            return res
-
-        inner._is_cached = True
-
-        return inner
-    return decorator
-
-
-class _StreakCamera:
+class _StreakCamera(SaveFriend):
     def __init__(self, run, name, config_file=None):
         self.run = run
         self.name = name
@@ -306,19 +329,6 @@ class _StreakCamera:
 
         self.dataset = xr.Dataset(coords=self.coords)
 
-    def compute(self):
-        import time
-        for name, quantity in self._quantities():
-            t0 = time.perf_counter()
-            quantity()
-            print(f"{name}: {round((time.perf_counter()-t0)*1000, 3)}ms")
-
-        # calibration data
-        self.cal.dataset()
-
-        # add dipole data
-        self.dipole.dataset()
-
     def __repr__(self):
         return f"<{type(self).__name__} {self.name}>"
 
@@ -326,11 +336,6 @@ class _StreakCamera:
         data = kd.xarray()
         data.attrs["units"] = kd.units
         return data
-
-    def _quantities(self):
-        """Return a list of all cache-able methods"""
-        methods = getmembers(self, predicate=ismethod)
-        return [(name, method) for name, method in methods if getattr(method, '_is_cached', False)]
 
     def info(self):
         """Print information about the VISAR component"""
@@ -404,7 +409,7 @@ class _StreakCamera:
         data.attrs["units"] = self.trigger[key].units
         return data - self.cal.reference_trigger_delay
 
-    @_cache(name="Sweep time")
+    @_cache(name="Sweep time", py_type=True)
     def sweep_time(self):
         """Sweep window in nanosecond
 
@@ -545,17 +550,14 @@ class _StreakCamera:
         return ax
 
     def save(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
-        self.compute()
         meta = self.run.run_metadata()
         proposal = meta.get("proposalNumber", "")
         run = meta.get("runNumber", "")
         fpath = f"{output}/{filename.format(proposal=proposal, run=run)}"
 
-        self.dataset.to_netcdf(
-            path=fpath, mode="a", group=self.name, format="NETCDF4", engine="h5netcdf"
-        )
+        super().save(fpath, self.name)
         self.cal.save(fpath)
-        self.dipole.save(fpath)
+        self.dipole.save(fpath, f'{self.name}/dipole')
 
 
 class _VISAR(_StreakCamera):
@@ -631,6 +633,6 @@ if __name__ == "__main__":
         vis = VISAR(r, name=v, config_file=config)
         vis.info()
 
-        for train_id in vis.shots():
+        for train_id in vis.train_ids.value:
             vis.plot(train_id)
         vis.save()
