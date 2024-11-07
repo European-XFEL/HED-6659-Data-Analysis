@@ -1,7 +1,7 @@
 from bisect import insort
 from enum import Enum
-from functools import cache, cached_property
-from inspect import signature
+from functools import cache, cached_property, wraps
+from inspect import signature, getmembers, ismethod
 from pathlib import Path
 
 import cv2
@@ -65,6 +65,21 @@ def dipole_ppu_open(run: DataCollection):
         .where(lambda x: x == DipolePPU.OPEN.value, drop=True)
         .trainId
     )
+
+
+def format_train_ids(data):
+    """Format train ID data
+
+    This function takes a 1D array, it then formats the output to show the first
+    element and formats the subsequent elements to only show the changing digits
+    """
+    max_diff = (data - data[0]).max()
+    ndigits = len(str(max_diff))
+    out = f'[{data[0]}'
+    for value in data[1:]:
+        out += f' ..{str(value)[-ndigits:]}'
+    out += ']'
+    return out
 
 
 class DIPOLE:
@@ -180,7 +195,7 @@ class CalibrationData:
     @property
     def dipole_zero(self):
         """Dipole position at 0 ns delay, 0 ns sweep delay"""
-        pixel_offset = self["pixDipole_0ns"][f"{self.visar.sweep_time}ns"]
+        pixel_offset = self["pixDipole_0ns"][f"{self.visar.sweep_time()}ns"]
         return self.timepoint(pixel_offset)
 
     @property
@@ -190,19 +205,19 @@ class CalibrationData:
 
     @property
     def reference_trigger_delay(self):
-        return self["positionTrigger_ref"][f"{self.visar.sweep_time}ns"]
+        return self["positionTrigger_ref"][f"{self.visar.sweep_time()}ns"]
 
     @cached_property
     def timepoint(self):
         """Compute Time from pixel position in ns"""
-        constants = self["timeAxisPolynomial"][f"{self.visar.sweep_time}ns"]
+        constants = self["timeAxisPolynomial"][f"{self.visar.sweep_time()}ns"]
         # Pad with leading 0 because there is no intercept for the time axis
         return np.poly1d(np.array([0, *constants])[::-1])
 
     @cache
     def map(self) -> tuple[np.ndarray, np.ndarray]:
         """Return input and output transformation maps"""
-        tr_map_file = self["transformationMaps"][f"{self.visar.sweep_time}ns"]
+        tr_map_file = self["transformationMaps"][f"{self.visar.sweep_time()}ns"]
         file_path = Path(self["dirTransformationMaps"]) / tr_map_file
         coords = np.loadtxt(file_path, delimiter=",")
         target = coords[..., 2:]
@@ -241,6 +256,37 @@ class CalibrationData:
         )
 
 
+def _cache(name, py_type=False):
+    """Decorator to cache the result of a method in the (xarray) dataset.
+
+    Parameters:
+    - name (str): The name under which the result will be cached in the dataset.
+    - py_type (bool): If True, the cached result will be converted to a Python type.
+
+    The decorator checks if the result for the given name is already cached in the dataset.
+    If not, it calls the decorated function to compute the result, caches it, and then returns it.
+    If py_type is True, the result is converted to a python type before returning.
+
+    note: the class must have a dataset object of type xarray.Dataset defined.
+    """
+    def decorator(func):
+        @wraps(func)
+        def inner(self, *args, **kwargs):
+            if name not in self.dataset:
+                data = func(self, *args, **kwargs)
+                self.dataset[name] = data
+            
+            res = self.dataset[name]
+            if py_type:
+                return res.data.tolist()
+            return res
+
+        inner._is_cached = True
+
+        return inner
+    return decorator
+
+
 class _StreakCamera:
     def __init__(self, run, name, config_file=None):
         self.run = run
@@ -260,31 +306,12 @@ class _StreakCamera:
 
         self.dataset = xr.Dataset(coords=self.coords)
 
-    def process(self):
+    def compute(self):
         import time
-
-        t0 = time.perf_counter()
-        self.sweep_time
-        print(f"sweep time: {round((time.perf_counter()-t0)*1000, 3)}ms")
-
-        for name in dir(self):
-            if name.startswith("__"):
-                continue
-
+        for name, quantity in self._quantities():
             t0 = time.perf_counter()
-            attr = getattr(self, name)
-            t1 = time.perf_counter()
-            if not callable(attr):
-                continue
-
-            if "_name" in signature(attr).parameters:
-                attr()
-                t2 = time.perf_counter()
-                print(
-                    f"{name}: getattr:{round((t1-t0)*1000, 3)}ms - execute:{round((t2-t1)*1000, 3)}ms"
-                )
-            else:
-                print(f"{name}: getattr:{round((t1-t0)*1000, 3)}ms")
+            quantity()
+            print(f"{name}: {round((time.perf_counter()-t0)*1000, 3)}ms")
 
         # calibration data
         self.cal.dataset()
@@ -295,12 +322,15 @@ class _StreakCamera:
     def __repr__(self):
         return f"<{type(self).__name__} {self.name}>"
 
-    def _data(self, name: str, kd: KeyData) -> xr.DataArray:
-        if name not in self.dataset:
-            data = kd.xarray()
-            data.attrs["units"] = kd.units
-            self.dataset[name] = data
-        return self.dataset[name]
+    def _data(self, kd: KeyData) -> xr.DataArray:
+        data = kd.xarray()
+        data.attrs["units"] = kd.units
+        return data
+
+    def _quantities(self):
+        """Return a list of all cache-able methods"""
+        methods = getmembers(self, predicate=ismethod)
+        return [(name, method) for name, method in methods if getattr(method, '_is_cached', False)]
 
     def info(self):
         """Print information about the VISAR component"""
@@ -318,77 +348,70 @@ class _StreakCamera:
             return f"{self.name}, {run_str}"
 
         data = []
-        for attr in dir(self):
-            if attr.startswith("_"):
+        for name, quantity in self._quantities():
+            if name.startswith('_'):
                 continue
-            if attr in ["image"]:
+            # skip image data
+            if name == 'image':
                 continue
-
-            v = getattr(self, attr)
-            if not callable(v):
-                continue
-
-            args = signature(v).parameters
-            if "_name" not in args:
+            if name == 'sweep_time':
+                # special case
+                data.append(("Sweep time:", f"{quantity():.6g}", "ns"))
                 continue
 
-            value = v()
+            value = quantity()
+            name = value.name
             units = value.attrs.get("units", "")
+
+            # only show a single value if it's not changing
             if len(np.unique(value)) == 1:
                 value = f"{value.data[0]:.6g}"
             else:
-                value = ", ".join(f"{v:.6g}" for v in value)
+                with np.printoptions(precision=3):
+                    value = str(value.data)
 
-            data.append((f'{args["_name"].default}:', value, units))
-        data.append(("Sweep time:", f"{self.sweep_time:.6g}", "ns"))
+            data.append((f'{name}:', value, units))
 
         span = max(len(e[0]) for e in data) + 1
-        # TODO format multiple values
         info_str += "\n".join(
             [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
-        info_str += f'\n\n  Train ID (shots): {self.coords.where(self.coords.type=="shot", drop=True).trainId.data}'
-        info_str += f'\n  Train ID (ref.): {self.coords.where(self.coords.type=="reference", drop=True).trainId.data}'
+
+        train_ids = lambda _type: self.coords.where(self.coords.type==_type, drop=True).trainId.data
+        info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
+        info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
         return info_str
 
-    def fel_delay(self, _name="Difference X-drive"):
-        if _name not in self.dataset:
-            fel_delay = (
-                self.cal.fel_zero
-                - self.cal.dipole_zero
-                - self.dipole.delay()
-                - self.sweep_delay()
-            )
-            self.dataset[_name] = xr.DataArray(
-                fel_delay, dims=["trainId"], attrs={"units": "ns"}
-            )
-        return self.dataset[_name]
+    @_cache(name="Difference X-drive")
+    def fel_delay(self):
+        fel_delay = (
+            self.cal.fel_zero
+            - self.cal.dipole_zero
+            - self.dipole.delay()
+            - self.sweep_delay()
+        )
+        return xr.DataArray(fel_delay, dims=["trainId"], attrs={"units": "ns"})
 
-    def sweep_delay(self, _name="Sweep delay"):
-        if _name not in self.dataset:
-            for key in ["actualDelay", "actualPosition"]:
-                if key in self.trigger:
-                    break
-            else:
-                raise KeyError(f"sweep delay property not found in {self.trigger}")
+    @_cache(name="Sweep delay")
+    def sweep_delay(self):
+        for key in ["actualDelay", "actualPosition"]:
+            if key in self.trigger:
+                break
+        else:
+            raise KeyError(f"sweep delay property not found in {self.trigger}")
 
-            data = self.trigger[key].xarray()
-            data.attrs["units"] = self.trigger[key].units
-            self.dataset[_name] = data - self.cal.reference_trigger_delay
+        data = self.trigger[key].xarray()
+        data.attrs["units"] = self.trigger[key].units
+        return data - self.cal.reference_trigger_delay
 
-        return self.dataset[_name]
-
-    @property
-    def sweep_time(self, _name="Sweep time"):
+    @_cache(name="Sweep time")
+    def sweep_time(self):
         """Sweep window in nanosecond
 
         We assume the sweep time does not change over a run
         """
-        if _name not in self.dataset:
-            sw, units = self.ctrl.run_value("timeRange").split(" ")
-            data = xr.DataArray(int(sw), attrs={"units": units})
-            self.dataset[_name] = data
-        return self.dataset[_name].data.tolist()
+        sw, units = self.ctrl.run_value("timeRange").split(" ")
+        return  xr.DataArray(int(sw), attrs={"units": units})
 
     @property
     def train_ids(self):
@@ -428,48 +451,45 @@ class _StreakCamera:
             }
         )
 
-    @cache
-    def image(self, _name="image"):
+    @_cache(name="image")
+    def image(self):
         """Get corrected images
 
         Returns corrected data for the trains with PPU opened. If *reference*
         is True, returns the first frame with PPU closed instead.
         """
-        if _name not in self.dataset:
-            data = self.detector.ndarray()
-            # SOP and 1w VISAR is 2x2 binned
-            # need to upscale it full size to use the time calibration
-            data = np.array([resize(frame) for frame in data])
-            data = np.rot90(data, 1, axes=(1, 2))
-            self.dataset[_name] = xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
-        return self.dataset[_name]
+        data = self.detector.ndarray()
+        # SOP and 1w VISAR is 2x2 binned
+        # need to upscale it full size to use the time calibration
+        data = np.array([resize(frame) for frame in data])
+        data = np.rot90(data, 1, axes=(1, 2))
+        return xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
 
-    def _time_axis(self, _name="Time axis"):
-        if _name not in self.dataset:
-            axis = self.cal.timepoint(np.arange(self.image().shape[-1]))
-            offset = self.cal.dipole_zero + self.dipole.delay() - self.sweep_delay()
+    @_cache(name="Time axis")
+    def _time_axis(self):
+        axis = self.cal.timepoint(np.arange(self.image().shape[-1]))
+        offset = self.cal.dipole_zero + self.dipole.delay() - self.sweep_delay()
 
-            data = (
-                np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
-                - offset.data[:, None]
-            )
-            self.dataset[_name] = xr.DataArray(
-                data, dims=["trainId", "Time"], attrs={"units": "ns"}
-            )
-        return self.dataset[_name]
+        data = (
+            np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
+            - offset.data[:, None]
+        )
+        return xr.DataArray(
+            data, dims=["trainId", "Time"], attrs={"units": "ns"}
+        )
 
-    def _space_axis(self, _name="Space axis"):
-        if _name not in self.dataset:
-            axis = np.arange(self.image().shape[-2]) * self.cal.dx
-            axis = axis - axis.mean()
+    @_cache(name="Space axis")
+    def _space_axis(self):
+        axis = np.arange(self.image().shape[-2]) * self.cal.dx
+        axis = axis - axis.mean()
 
-            data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
-            self.dataset[_name] = xr.DataArray(
-                data, dims=["trainId", "Space"], attrs={"units": "um"}
-            )
-        return self.dataset[_name]
+        data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
+        return xr.DataArray(
+            data, dims=["trainId", "Space"], attrs={"units": "um"}
+        )
 
     def plot(self, train_id, ax=None):
+        self.compute()
         ds = self.dataset.sel(trainId=train_id)
         data = ds.image
         type_ = ds.type.data.tolist()
@@ -525,7 +545,7 @@ class _StreakCamera:
         return ax
 
     def save(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
-        self.process()
+        self.compute()
         meta = self.run.run_metadata()
         proposal = meta.get("proposalNumber", "")
         run = meta.get("runNumber", "")
@@ -539,49 +559,50 @@ class _StreakCamera:
 
 
 class _VISAR(_StreakCamera):
-    def zero_delay_position(self, _name="Zero delay"):
-        return self._data(_name, self.arm["zeroDelayPosition"])
+    @_cache(name="Zero delay")
+    def zero_delay_position(self):
+        return self._data(self.arm["zeroDelayPosition"])
 
-    def etalon_thickness(self, _name="Etalon thickness"):
-        return self._data(_name, self.arm["etalonThickness"])
+    @_cache(name="Etalon thickness")
+    def etalon_thickness(self):
+        return self._data(self.arm["etalonThickness"])
 
-    def motor_displacement(self, _name="Motor displacement"):
-        return self._data(_name, self.arm["motorDisplacement"])
+    @_cache(name="Motor displacement")
+    def motor_displacement(self):
+        return self._data(self.arm["motorDisplacement"])
 
-    def sensitivity(self, _name="Sensitivity"):
-        return self._data(_name, self.arm["sensitivity"])
+    @_cache(name="Sensitivity")
+    def sensitivity(self):
+        return self._data(self.arm["sensitivity"])
 
-    def temporal_delay(self, _name="Temporal delay"):
-        return self._data(_name, self.arm["temporalDelay"])
+    @_cache(name="Temporal delay")
+    def temporal_delay(self):
+        return self._data(self.arm["temporalDelay"])
 
 
 class _KEPLER(_VISAR):
     SWEEP_SPEED = {1: 50, 2: 20, 3: 10, 4: 5, 5: 1, 6: 100}
 
-    @property
-    def sweep_time(self, _name="Sweep time"):
+    @_cache(name="Sweep time", py_type=True)
+    def sweep_time(self):
         """Sweep window in nanosecond
 
         We assume the sweep time does not change over a run.
 
         Raise ValueError if the sweep speed changes over the run.
         """
-        if _name not in self.dataset:
-            ss = self.ctrl["sweepSpeed"].as_single_value()
-            st = self.SWEEP_SPEED[int(ss)]
-            self.dataset[_name] = xr.DataArray(st, attrs={"units": "ns"})
-        return self.dataset[_name].data.tolist()
+        ss = self.ctrl["sweepSpeed"].as_single_value()
+        st = self.SWEEP_SPEED[int(ss)]
+        return xr.DataArray(st, attrs={"units": "ns"})
 
-    @cache
-    def image(self, _name="image"):
-        if _name not in self.dataset:
-            data = self.detector.ndarray()
-            data = np.rot90(data, 1, axes=(1, 2))
-            data = np.array(
-                [np.fliplr(remap(frame, *self.cal.map())) for frame in data]
-            )
-            self.dataset[_name] = xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
-        return self.dataset[_name]
+    @_cache(name="image")
+    def image(self):
+        data = self.detector.ndarray()
+        data = np.rot90(data, 1, axes=(1, 2))
+        data = np.array(
+            [np.fliplr(remap(frame, *self.cal.map())) for frame in data]
+        )
+        return xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
 
 
 class _VISAR_1w(_VISAR):
