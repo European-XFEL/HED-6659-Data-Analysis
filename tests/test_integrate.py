@@ -3,7 +3,7 @@ import h5py
 from timeit import repeat
 from . import unittest_data_path
 
-from xrd.integrate import (
+from hed_6659.xrd import (
     integrate_single,
     get_azimuthal_integrator,
     integrate_multiple,

@@ -1,3 +1,9 @@
+""" VISAR correction
+
+Code to correct image deformation for the KEPLER (and others) streak cameras
+used for the VISAR device at the HED instrument at European XFEL.
+"""
+
 from bisect import insort
 from enum import Enum
 from functools import cache, cached_property, wraps
@@ -12,6 +18,8 @@ import toml
 import xarray as xr
 from extra_data import DataCollection, KeyData, by_id
 from scipy.interpolate import griddata
+
+__all__ = ['VISAR']
 
 VISAR_DEVICES = {
     "KEPLER1": {
@@ -118,7 +126,8 @@ def _cache(name, py_type=False):
 class SaveFriend:
     """ functions to compute cached data and save Dataset to hdf5
     
-    The main class must define a dataset object.
+    The main class must define a (xr.Dataset) dataset and a
+    (extra_data.DataCollection) run object.
     """
     def _quantities(self):
         """Return a list of all cache-able methods"""
@@ -127,6 +136,14 @@ class SaveFriend:
             (name, method) for name, method in methods
             if getattr(method, '_is_cached', False)
         ]
+
+    @cached_property
+    def run_number(self):
+        return self.run.run_metadata().get("runNumber", "?")
+
+    @cached_property
+    def proposal_number(self):
+        return self.run.run_metadata().get("proposalNumber", "?")
 
     def compute(self, profile=False):
         for name, quantity in self._quantities():
@@ -154,10 +171,7 @@ class DIPOLE(SaveFriend):
 
     def format(self, compact=False):
         """Format information about the VISAR component."""
-        meta = self.run.run_metadata()
-        run_str = (
-            f'p{meta.get("proposalNumber", "?"):06}, r{meta.get("runNumber", "?"):04}'
-        )
+        run_str = f'p{self.proposal_number:06}, r{self.run_number:04}'
 
         if compact:
             return f"{self.name}, {run_str}"
@@ -344,10 +358,7 @@ class _StreakCamera(SaveFriend):
 
     def format(self, compact=False):
         """Format information about the VISAR component."""
-        meta = self.run.run_metadata()
-        run_str = (
-            f'p{meta.get("proposalNumber", "?"):06}, r{meta.get("runNumber", "?"):04}'
-        )
+        run_str = f'p{self.proposal_number:06}, r{self.run_number:04}'
         info_str = f"{self.name} properties for {run_str}:\n"
 
         if compact:
@@ -545,25 +556,21 @@ class _StreakCamera(SaveFriend):
         ax.grid(which="minor", color="k", linestyle=":", linewidth=1, alpha=1)
 
         fig.colorbar(im, ax=ax)
-        # fig.tight_layout()
+        fig.tight_layout()
 
         return ax
 
     def save(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
-        meta = self.run.run_metadata()
-        proposal = meta.get("proposalNumber", "")
-        run = meta.get("runNumber", "")
-        fpath = f"{output}/{filename.format(proposal=proposal, run=run)}"
+        fname = filename.format(proposal=self.proposal_number, run=self.run_number)
+        fpath = Path(output) / fname
 
         super().save(fpath, self.name)
         self.cal.save(fpath)
-        self.dipole.save(fpath, f'{self.name}/dipole')
+        self.dipole.save(fpath, f'{self.name}/DiPOLE')
 
     def to_png(self, output='.', filename="p{proposal:06}_r{run:04}_{name}.png", plots_per_row=1):
-        meta = self.run.run_metadata()
-        proposal = meta.get("proposalNumber", "")
-        run = meta.get("runNumber", "")
-        fpath = f"{output}/{filename.format(name=self.name, proposal=proposal, run=run)}"
+        fname = filename.format(name=self.name, proposal=self.proposal_number, run=self.run_number)
+        fpath = Path(output) / fname
 
         self.compute()
         n_images = len(self.train_ids.value)
