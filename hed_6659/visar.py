@@ -295,6 +295,7 @@ class DIPOLE(SaveFriend):
         threshold = traces.median(axis=1) + threshold_sigma * noise_std
 
         power_traces = []
+        durations = []
         for trace, thresh, nrj in zip(traces, threshold, energy):
             indices = largest_group(np.where(trace > thresh)[0])
             if indices.size == 0:
@@ -302,6 +303,7 @@ class DIPOLE(SaveFriend):
             start, stop = indices[0], min(trace.size, indices[-1] + 1)
 
             dipole_duration = (stop - start) * dt * 1e-9  # [s]
+            durations.append(dipole_duration / 1e-9)
             scaling = nrj / (trace[start:stop].sum() * dipole_duration)
             power = (
                 trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
@@ -323,7 +325,7 @@ class DIPOLE(SaveFriend):
             coords={"time [ns]": time_coord, "trainId": traces.trainId},
             dims=["trainId", "time [ns]"],
             name="Power",
-            attrs={"units": "W"},
+            attrs={"units": "W", "durations": durations},
         )
 
 
@@ -445,7 +447,7 @@ class _StreakCamera(SaveFriend):
 
     def info(self):
         """Print information about the VISAR component"""
-        print(self.format())
+        print(f'{self.format()}\n\n{self.dipole.format()}')
 
     def format(self, compact=False):
         """Format information about the VISAR component."""
