@@ -1,4 +1,4 @@
-""" VISAR correction
+"""VISAR correction
 
 Code to correct image deformation for the KEPLER (and others) streak cameras
 used for the VISAR device at the HED instrument at European XFEL.
@@ -17,9 +17,11 @@ import numpy as np
 import toml
 import xarray as xr
 from extra_data import DataCollection, KeyData, by_id
+from extra_data.exceptions import PropertyNameError, SourceNameError
 from scipy.interpolate import griddata
+from scipy.stats import median_abs_deviation
 
-__all__ = ['VISAR']
+__all__ = ["VISAR"]
 
 VISAR_DEVICES = {
     "KEPLER1": {
@@ -85,33 +87,73 @@ def format_train_ids(data):
     """
     max_diff = (data - data[0]).max()
     ndigits = len(str(max_diff))
-    out = f'[{data[0]}'
+    out = f"[{data[0]}"
     for value in data[1:]:
-        out += f' ..{str(value)[-ndigits:]}'
-    out += ']'
+        out += f" ..{str(value)[-ndigits:]}"
+    out += "]"
     return out
+
+
+def largest_group(arr):
+    """
+    Find the largest contiguous group in a sorted array of integers.
+
+    Parameters:
+        arr (numpy.ndarray): 1D sorted array of integers
+
+    Returns:
+        array containing the contiguous sequence
+    """
+    if len(arr) == 0:
+        return arr[0:0]
+
+    current_start = 0
+    current_length = 1
+    start = 0
+    length = 1
+
+    for i in range(1, len(arr)):
+        if arr[i] == arr[i - 1] + 1:
+            current_length += 1
+        else:
+            if current_length > length:
+                length = current_length
+                start = current_start
+            current_start = i
+            current_length = 1
+
+    # Check one last time in case the longest sequence was at the end
+    if current_length > length:
+        length = current_length
+        start = current_start
+
+    return arr[start : start + length]
 
 
 def _cache(name, py_type=False):
     """Decorator to cache the result of a method in the (xarray) dataset.
 
     Parameters:
-    - name (str): The name under which the result will be cached in the dataset.
-    - py_type (bool): If True, the cached result will be converted to a Python type.
+        name (str): The name under which the result will be cached in
+    the dataset.
+        py_type (bool): If True, the cached result will be converted
+    to a Python type.
 
-    The decorator checks if the result for the given name is already cached in the dataset.
-    If not, it calls the decorated function to compute the result, caches it, and then returns it.
-    If py_type is True, the result is converted to a python type before returning.
+    The decorator checks if the result for the given name is already cached in
+    the dataset. If not, it calls the decorated function to compute the result,
+    caches it, and then returns it. If py_type is True, the result is converted
+    to a python type before returning.
 
     note: the class must have a dataset object of type xarray.Dataset defined.
     """
+
     def decorator(func):
         @wraps(func)
         def inner(self, *args, **kwargs):
             if name not in self.dataset:
                 data = func(self, *args, **kwargs)
                 self.dataset[name] = data
-            
+
             res = self.dataset[name]
             if py_type:
                 return res.data.tolist()
@@ -120,6 +162,7 @@ def _cache(name, py_type=False):
         inner._is_cached = True
 
         return inner
+
     return decorator
 
 
@@ -129,12 +172,14 @@ class SaveFriend:
     The main class must define a (xr.Dataset) dataset and a
     (extra_data.DataCollection) run object.
     """
+
     def _quantities(self):
         """Return a list of all cache-able methods"""
         methods = getmembers(self, predicate=ismethod)
         return [
-            (name, method) for name, method in methods
-            if getattr(method, '_is_cached', False)
+            (name, method)
+            for name, method in methods
+            if getattr(method, "_is_cached", False)
         ]
 
     @cached_property
@@ -152,7 +197,7 @@ class SaveFriend:
             if profile:
                 print(f"{name}: {round((perf_counter()-t0)*1000, 3)}ms")
 
-    def save(self, path, group):
+    def to_h5(self, path, group):
         self.compute()
         self.dataset.to_netcdf(
             path=path, mode="a", group=group, format="NETCDF4", engine="h5netcdf"
@@ -161,7 +206,6 @@ class SaveFriend:
 
 class DIPOLE(SaveFriend):
     def __init__(self, visar, run, name="DiPOLE"):
-        self.visar = visar
         self.name = name
         self.run = run
         self.dataset = xr.Dataset(coords=visar.coords)
@@ -179,9 +223,13 @@ class DIPOLE(SaveFriend):
         info_str = f"{self.name} properties for {run_str}:\n"
         data = []
         for name, quantity in self._quantities():
-            if name.startswith('_'):
+            if name.startswith("_"):
                 continue
+            if name == 'trace':
+                continue
+
             value = quantity()
+            value = value[value.type == 'shot']
             name = value.name
             units = value.attrs.get("units", "")
             # only show a single value if it's not changing
@@ -190,7 +238,7 @@ class DIPOLE(SaveFriend):
             else:
                 with np.printoptions(precision=3):
                     value = str(value.data)
-            data.append((f'{name}:', value, units))
+            data.append((f"{name}:", value, units))
 
         span = max(len(e[0]) for e in data) + 1
         info_str += "\n".join(
@@ -212,29 +260,71 @@ class DIPOLE(SaveFriend):
         data.attrs["units"] = energy.units
         return data
 
-    def trace(self, dt: float = 0.2):
+    @_cache(name="Trace")
+    def trace(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
         """
-        dt: float [ns/sample]
+        Find DiPOLE power signals
+
+        Parameters:
+            threshold_sigma (float): The number of standard deviations above the median
+                to use as the threshold for detecting significant signals in the traces.
+                Default is 3.0.
+            dt (float): The sample period in nanoseconds per sample. This is used to
+                convert sample indices to time coordinates. Default is 0.2.
+            margin (int): The additional margin in nanoseconds around the detected dipole
+                signal. This is used to extend the trace. Default is 5.
+
+        Returns:
+            xr.DataArray: A DataArray containing the extracted power signals for each
+            train ID, with time coordinates adjusted according to the specified margin.
+            The dimensions are ["trainId", "time [ns]"], and the data is in Watts (W).
         """
-        # TODO fix that function
+        margin = int(margin / dt)  # margin in # sample
 
-        traces = self.run[
-            "HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"
-        ].ndarray()
+        try:
+            scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
+        except (SourceNameError, PropertyNameError):
+            return xr.DataArray([])
 
-        vmax = np.unique(traces[:, :40000], axis=1).max(axis=1)
+        traces = scope.xarray()
 
-        time_axis = []
-        power_trace = []
-        for trace, trace_max in zip(traces, vmax):
-            idx = np.where(trace > trace_max)[0]
-            time_axis.append((np.arange(idx[0] - 25, idx[-1] + 25) - idx[0]) * dt)
+        energy = self.energy()
+        energy = energy[energy.type == "shot"].data
 
-            dipole_duration = (idx[-1] - idx[0]) * dt * 1e-9
-            energy = self.energy()
-            power_scaling = energy / (trace[idx[0] : idx[-1]].sum() * dipole_duration)
-            power_trace.append(trace[idx[0] - 25 : idx[-1] + 25] * power_scaling)
-        return time_axis, power_trace
+        noise_std = median_abs_deviation(traces, axis=1, scale="normal")
+        threshold = traces.median(axis=1) + threshold_sigma * noise_std
+
+        power_traces = []
+        for trace, thresh, nrj in zip(traces, threshold, energy):
+            indices = largest_group(np.where(trace > thresh)[0])
+            if indices.size == 0:
+                continue
+            start, stop = indices[0], min(trace.size, indices[-1] + 1)
+
+            dipole_duration = (stop - start) * dt * 1e-9  # [s]
+            scaling = nrj / (trace[start:stop].sum() * dipole_duration)
+            power = (
+                trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            )
+            power_traces.append(power)
+
+        if len(power_traces) == 0:
+            return xr.DataArray([])
+
+        longest_trace = max(power_traces, key=len).size
+        time_coord = (np.arange(longest_trace) - margin) * dt  # [ns]
+
+        out = np.full((traces.shape[0], longest_trace), np.nan)
+        for idx, power in enumerate(power_traces):
+            out[idx, :power.size] = power
+
+        return xr.DataArray(
+            out,
+            coords={"time [ns]": time_coord, "trainId": traces.trainId},
+            dims=["trainId", "time [ns]"],
+            name="Power",
+            attrs={"units": "W"},
+        )
 
 
 class CalibrationData:
@@ -309,17 +399,18 @@ class CalibrationData:
                 "Reference trigger delay": xr.DataArray(
                     self.reference_trigger_delay, attrs={"units": "ns"}
                 ),
-        })
+            }
+        )
         if self.map() is not None:
             data["Dewarp source"] = (["dim_0", "dim_1"], self.map()[0])
             data["Dewarp target"] = (["dim_0", "dim_1"], self.map()[1])
         return data
 
-    def save(self, file_path):
+    def to_h5(self, file_path, group):
         self.dataset().to_netcdf(
             path=file_path,
             mode="a",
-            group=f"{self.visar.name}/calibration",
+            group=group,
             format="NETCDF4",
             engine="h5netcdf",
         )
@@ -366,12 +457,12 @@ class _StreakCamera(SaveFriend):
 
         data = []
         for name, quantity in self._quantities():
-            if name.startswith('_'):
+            if name.startswith("_"):
                 continue
             # skip image data
-            if name == 'image':
+            if name == "image":
                 continue
-            if name == 'sweep_time':
+            if name == "sweep_time":
                 # special case
                 data.append(("Sweep time:", f"{quantity():.6g}", "ns"))
                 continue
@@ -387,14 +478,16 @@ class _StreakCamera(SaveFriend):
                 with np.printoptions(precision=3):
                     value = str(value.data)
 
-            data.append((f'{name}:', value, units))
+            data.append((f"{name}:", value, units))
 
         span = max(len(e[0]) for e in data) + 1
         info_str += "\n".join(
             [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
 
-        train_ids = lambda _type: self.coords.where(self.coords.type==_type, drop=True).trainId.data
+        train_ids = lambda _type: self.coords.where(
+            self.coords.type == _type, drop=True
+        ).trainId.data
         info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
         info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
         return info_str
@@ -428,7 +521,7 @@ class _StreakCamera(SaveFriend):
         We assume the sweep time does not change over a run
         """
         sw, units = self.ctrl.run_value("timeRange").split(" ")
-        return  xr.DataArray(int(sw), attrs={"units": units})
+        return xr.DataArray(int(sw), attrs={"units": units})
 
     @property
     def train_ids(self):
@@ -491,9 +584,7 @@ class _StreakCamera(SaveFriend):
             np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
             - offset.data[:, None]
         )
-        return xr.DataArray(
-            data, dims=["trainId", "Time"], attrs={"units": "ns"}
-        )
+        return xr.DataArray(data, dims=["trainId", "Time"], attrs={"units": "ns"})
 
     @_cache(name="Space axis")
     def _space_axis(self):
@@ -501,9 +592,7 @@ class _StreakCamera(SaveFriend):
         axis = axis - axis.mean()
 
         data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
-        return xr.DataArray(
-            data, dims=["trainId", "Space"], attrs={"units": "um"}
-        )
+        return xr.DataArray(data, dims=["trainId", "Space"], attrs={"units": "um"})
 
     def plot(self, train_id, ax=None, fig=None):
         self.compute()
@@ -520,6 +609,7 @@ class _StreakCamera(SaveFriend):
 
         if ax is None:
             import matplotlib.pyplot as plt
+
             fig, ax = plt.subplots(figsize=(9, 5))
 
         tid_str = f"{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}"
@@ -560,15 +650,43 @@ class _StreakCamera(SaveFriend):
 
         return ax
 
-    def save(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
+    def to_h5(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
+        """Save the corrected VISAR data to an HDF5 file.
+
+        This method saves the VISAR object, including, calibration data, and
+        dipole data, to an HDF5 file, in the netCDF format.
+
+        Parameters:
+            output (str): The directory where the HDF5 file will be saved.
+            filename (str): The filename format for the saved HDF5 file,
+                            which can include placeholders for proposal and run
+                            numbers.
+        """
         fname = filename.format(proposal=self.proposal_number, run=self.run_number)
         fpath = Path(output) / fname
 
-        super().save(fpath, self.name)
-        self.cal.save(fpath)
-        self.dipole.save(fpath, f'{self.name}/DiPOLE')
+        super().to_h5(fpath, self.name)
+        self.cal.to_h5(fpath, f"{self.name}/calibration")
+        self.dipole.to_h5(fpath, f"{self.name}/DiPOLE")
 
-    def to_png(self, output='.', filename="p{proposal:06}_r{run:04}_{name}.png", plots_per_row=1):
+    def to_png(
+        self,
+        output=".",
+        filename="p{proposal:06}_r{run:04}_{name}.png",
+        plots_per_row=1,
+    ):
+        """Save the VISAR plots to PNG files.
+
+        This method generates and saves plots for each train ID in the VISAR
+        dataset to PNG files. The output filename can include placeholders for
+        proposal and run numbers, as well as the name of the VISAR component.
+
+        Parameters:
+            output (str): The directory where the PNG files will be saved.
+            filename (str): The filename format for the saved PNG files,
+                            which can include placeholders for proposal, run numbers, and the name.
+            plots_per_row (int): The number of plots to display per row in the saved figure.
+        """
         fname = filename.format(name=self.name, proposal=self.proposal_number, run=self.run_number)
         fpath = Path(output) / fname
 
@@ -576,10 +694,11 @@ class _StreakCamera(SaveFriend):
         n_images = len(self.train_ids.value)
 
         import matplotlib.pyplot as plt
+
         rows = ceil(n_images / plots_per_row)
         cols = min(n_images, plots_per_row)
 
-        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 3 * rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(9 * cols, 5 * rows))
         fig.subplots_adjust(hspace=0.4, wspace=0.4)
 
         # Flatten axes for easy indexing, even if there's only one row or column
@@ -590,9 +709,9 @@ class _StreakCamera(SaveFriend):
 
         # Turn off any unused subplots
         for i in range(n_images, len(axes)):
-            axes[i].axis('off')
+            axes[i].axis("off")
 
-        fig.savefig(fpath, bbox_inches='tight', format='png')
+        fig.savefig(fpath, bbox_inches="tight", format="png")
 
 
 class _VISAR(_StreakCamera):
@@ -636,9 +755,7 @@ class _KEPLER(_VISAR):
     def image(self):
         data = self.detector.ndarray()
         data = np.rot90(data, 1, axes=(1, 2))
-        data = np.array(
-            [np.fliplr(remap(frame, *self.cal.map())) for frame in data]
-        )
+        data = np.array([np.fliplr(remap(frame, *self.cal.map())) for frame in data])
         return xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
 
 
@@ -647,6 +764,25 @@ class _VISAR_1w(_VISAR):
 
 
 def VISAR(run, name="KEPLER1", config_file=None):
+    """Create a VISAR object based on the specified device name.
+
+    Parameters:
+        run (DataCollection): The run data collection object containing the data
+            for the VISAR device. name (str): The name of the VISAR device to
+            instantiate. Must be one of "KEPLER1", "KEPLER2", "VISAR_1w", "SOP".
+            Default is "KEPLER1".
+        config_file (str, optional): Path to the
+            configuration file for the VISAR device. If provided, it will be
+            used to initialize the CalibrationData.
+
+    Returns:
+        _StreakCamera: An instance of the appropriate VISAR class based on the
+            device name.
+
+    Raises:
+        ValueError: If the provided name is not one of the valid VISAR device
+            names.
+    """
     if name == "SOP":
         _V = _StreakCamera
     elif name == "VISAR_1w":
@@ -670,4 +806,4 @@ if __name__ == "__main__":
 
         for train_id in vis.train_ids.value:
             vis.plot(train_id)
-        vis.save()
+        vis.to_h5()
