@@ -207,30 +207,57 @@ class DIPOLE(SaveFriend):
         return data
 
     def trace(self, dt: float = 0.2):
+    def trace(self, signal_index: int = 40000, dt: float = 0.2, margin: int = 5):
         """
-        dt: float [ns/sample]
+        signal_index: int, index of the signal start in the trace
+        dt: float, sample period [nanoseconds / sample]
+        margin: int, additional margin around the dipole signal [nanoseconds]
         """
-        # TODO fix that function
+        margin = int(margin / dt)  # margin in # sample
 
         traces = self.run[
             "HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"
-        ].ndarray()
+        ].xarray()
 
-        vmax = np.unique(traces[:, :40000], axis=1).max(axis=1)
+        # max value of each trainId, up to signal_index samples
+        background = traces[:, :signal_index].max(axis=1)
 
-        time_axis = []
-        power_trace = []
-        for trace, trace_max in zip(traces, vmax):
-            idx = np.where(trace > trace_max)[0]
-            time_axis.append((np.arange(idx[0] - 25, idx[-1] + 25) - idx[0]) * dt)
+        def min_max_indices(row, threshold):
+            """ get first and last index of row above threshold """
+            indices = np.where(row > threshold)[0]
+            print(len(indices))
+            if indices.size == 0:  # If no elements meet the condition
+                return -1, -1
+            return indices[0], indices[-1]
 
-            dipole_duration = (idx[-1] - idx[0]) * dt * 1e-9
-            energy = self.energy()
-            power_scaling = energy / (trace[idx[0] : idx[-1]].sum() * dipole_duration)
-            power_trace.append(trace[idx[0] - 25 : idx[-1] + 25] * power_scaling)
-        return time_axis, power_trace
+        energy = self.energy()
+        energy = energy[energy.type=='shot'].data
 
+        power_traces = []
+        for trace, bg, nrj in zip(traces, background, energy):
+            start, stop = min_max_indices(trace, bg)
+            samples = stop - start
 
+            dipole_duration = samples * dt * 1e-9  # [s]
+            scaling = nrj / (trace[start:stop+1].sum() * dipole_duration)
+            power = trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            power_traces.append(power)
+
+        longest_trace = max(power_traces, key=len).size
+        time_coord = (np.arange(longest_trace) - margin) * dt  # [ns]
+
+        out = np.full((traces.shape[0], longest_trace), np.nan)
+        for idx, power in enumerate(power_traces):
+            out[idx] = power
+
+        return xr.DataArray(
+            out,
+            coords={'time [ns]': time_coord, 'trainId': traces.trainId},
+            dims=['trainId', 'time [ns]'],
+            name='Power',
+            attrs={'units': 'W'},
+        )
+    
 class CalibrationData:
     def __init__(self, visar, file_path=None):
         self.visar = visar
@@ -581,6 +608,7 @@ class _StreakCamera(SaveFriend):
         cols = min(n_images, plots_per_row)
 
         fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 3 * rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(9 * cols, 5 * rows))
         fig.subplots_adjust(hspace=0.4, wspace=0.4)
 
         # Flatten axes for easy indexing, even if there's only one row or column
