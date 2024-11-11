@@ -1,4 +1,4 @@
-""" VISAR correction
+"""VISAR correction
 
 Code to correct image deformation for the KEPLER (and others) streak cameras
 used for the VISAR device at the HED instrument at European XFEL.
@@ -20,7 +20,7 @@ from extra_data import DataCollection, KeyData, by_id
 from scipy.interpolate import griddata
 from scipy.stats import median_abs_deviation
 
-__all__ = ['VISAR']
+__all__ = ["VISAR"]
 
 VISAR_DEVICES = {
     "KEPLER1": {
@@ -86,10 +86,10 @@ def format_train_ids(data):
     """
     max_diff = (data - data[0]).max()
     ndigits = len(str(max_diff))
-    out = f'[{data[0]}'
+    out = f"[{data[0]}"
     for value in data[1:]:
-        out += f' ..{str(value)[-ndigits:]}'
-    out += ']'
+        out += f" ..{str(value)[-ndigits:]}"
+    out += "]"
     return out
 
 
@@ -112,7 +112,7 @@ def largest_group(arr):
     length = 1
 
     for i in range(1, len(arr)):
-        if arr[i] == arr[i-1] + 1:
+        if arr[i] == arr[i - 1] + 1:
             current_length += 1
         else:
             if current_length > length:
@@ -126,7 +126,7 @@ def largest_group(arr):
         length = current_length
         start = current_start
 
-    return arr[start:start + length]
+    return arr[start : start + length]
 
 
 def _cache(name, py_type=False):
@@ -145,13 +145,14 @@ def _cache(name, py_type=False):
 
     note: the class must have a dataset object of type xarray.Dataset defined.
     """
+
     def decorator(func):
         @wraps(func)
         def inner(self, *args, **kwargs):
             if name not in self.dataset:
                 data = func(self, *args, **kwargs)
                 self.dataset[name] = data
-            
+
             res = self.dataset[name]
             if py_type:
                 return res.data.tolist()
@@ -160,20 +161,23 @@ def _cache(name, py_type=False):
         inner._is_cached = True
 
         return inner
+
     return decorator
 
 
 class SaveFriend:
-    """ functions to compute cached data and save Dataset to hdf5
-    
+    """functions to compute cached data and save Dataset to hdf5
+
     The main class must define a dataset object.
     """
+
     def _quantities(self):
         """Return a list of all cache-able methods"""
         methods = getmembers(self, predicate=ismethod)
         return [
-            (name, method) for name, method in methods
-            if getattr(method, '_is_cached', False)
+            (name, method)
+            for name, method in methods
+            if getattr(method, "_is_cached", False)
         ]
 
     def compute(self, profile=False):
@@ -213,7 +217,7 @@ class DIPOLE(SaveFriend):
         info_str = f"{self.name} properties for {run_str}:\n"
         data = []
         for name, quantity in self._quantities():
-            if name.startswith('_'):
+            if name.startswith("_"):
                 continue
             value = quantity()
             name = value.name
@@ -224,7 +228,7 @@ class DIPOLE(SaveFriend):
             else:
                 with np.printoptions(precision=3):
                     value = str(value.data)
-            data.append((f'{name}:', value, units))
+            data.append((f"{name}:", value, units))
 
         span = max(len(e[0]) for e in data) + 1
         info_str += "\n".join(
@@ -262,7 +266,7 @@ class DIPOLE(SaveFriend):
         background = traces[:, :signal_index].max(axis=1)
 
         def min_max_indices(row, threshold):
-            """ get first and last index of row above threshold """
+            """get first and last index of row above threshold"""
             indices = np.where(row > threshold)[0]
             print(len(indices))
             if indices.size == 0:  # If no elements meet the condition
@@ -270,7 +274,7 @@ class DIPOLE(SaveFriend):
             return indices[0], indices[-1]
 
         energy = self.energy()
-        energy = energy[energy.type=='shot'].data
+        energy = energy[energy.type == "shot"].data
 
         power_traces = []
         for trace, bg, nrj in zip(traces, background, energy):
@@ -278,8 +282,10 @@ class DIPOLE(SaveFriend):
             samples = stop - start
 
             dipole_duration = samples * dt * 1e-9  # [s]
-            scaling = nrj / (trace[start:stop+1].sum() * dipole_duration)
-            power = trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            scaling = nrj / (trace[start : stop + 1].sum() * dipole_duration)
+            power = (
+                trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            )
             power_traces.append(power)
 
         longest_trace = max(power_traces, key=len).size
@@ -291,12 +297,12 @@ class DIPOLE(SaveFriend):
 
         return xr.DataArray(
             out,
-            coords={'time [ns]': time_coord, 'trainId': traces.trainId},
-            dims=['trainId', 'time [ns]'],
-            name='Power',
-            attrs={'units': 'W'},
+            coords={"time [ns]": time_coord, "trainId": traces.trainId},
+            dims=["trainId", "time [ns]"],
+            name="Power",
+            attrs={"units": "W"},
         )
-    
+
     def trace1(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
         """
         signal_index: int, index of the signal start in the trace
@@ -310,9 +316,9 @@ class DIPOLE(SaveFriend):
         ].xarray()
 
         energy = self.energy()
-        energy = energy[energy.type=='shot'].data
+        energy = energy[energy.type == "shot"].data
 
-        noise_std = median_abs_deviation(traces, axis=1, scale='normal')
+        noise_std = median_abs_deviation(traces, axis=1, scale="normal")
         threshold = traces.median(axis=1) + threshold_sigma * noise_std
 
         power_traces = []
@@ -325,7 +331,9 @@ class DIPOLE(SaveFriend):
 
             dipole_duration = (stop - start) * dt * 1e-9  # [s]
             scaling = nrj / (trace[start:stop].sum() * dipole_duration)
-            power = trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            power = (
+                trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            )
             power_traces.append(power)
 
         longest_trace = max(power_traces, key=len).size
@@ -337,11 +345,12 @@ class DIPOLE(SaveFriend):
 
         return xr.DataArray(
             out,
-            coords={'time [ns]': time_coord, 'trainId': traces.trainId},
-            dims=['trainId', 'time [ns]'],
-            name='Power',
-            attrs={'units': 'W'},
+            coords={"time [ns]": time_coord, "trainId": traces.trainId},
+            dims=["trainId", "time [ns]"],
+            name="Power",
+            attrs={"units": "W"},
         )
+
 
 class CalibrationData:
     def __init__(self, visar, file_path=None):
@@ -415,7 +424,8 @@ class CalibrationData:
                 "Reference trigger delay": xr.DataArray(
                     self.reference_trigger_delay, attrs={"units": "ns"}
                 ),
-        })
+            }
+        )
         if self.map() is not None:
             data["Dewarp source"] = (["dim_0", "dim_1"], self.map()[0])
             data["Dewarp target"] = (["dim_0", "dim_1"], self.map()[1])
@@ -475,12 +485,12 @@ class _StreakCamera(SaveFriend):
 
         data = []
         for name, quantity in self._quantities():
-            if name.startswith('_'):
+            if name.startswith("_"):
                 continue
             # skip image data
-            if name == 'image':
+            if name == "image":
                 continue
-            if name == 'sweep_time':
+            if name == "sweep_time":
                 # special case
                 data.append(("Sweep time:", f"{quantity():.6g}", "ns"))
                 continue
@@ -496,14 +506,16 @@ class _StreakCamera(SaveFriend):
                 with np.printoptions(precision=3):
                     value = str(value.data)
 
-            data.append((f'{name}:', value, units))
+            data.append((f"{name}:", value, units))
 
         span = max(len(e[0]) for e in data) + 1
         info_str += "\n".join(
             [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
 
-        train_ids = lambda _type: self.coords.where(self.coords.type==_type, drop=True).trainId.data
+        train_ids = lambda _type: self.coords.where(
+            self.coords.type == _type, drop=True
+        ).trainId.data
         info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
         info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
         return info_str
@@ -537,7 +549,7 @@ class _StreakCamera(SaveFriend):
         We assume the sweep time does not change over a run
         """
         sw, units = self.ctrl.run_value("timeRange").split(" ")
-        return  xr.DataArray(int(sw), attrs={"units": units})
+        return xr.DataArray(int(sw), attrs={"units": units})
 
     @property
     def train_ids(self):
@@ -600,9 +612,7 @@ class _StreakCamera(SaveFriend):
             np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
             - offset.data[:, None]
         )
-        return xr.DataArray(
-            data, dims=["trainId", "Time"], attrs={"units": "ns"}
-        )
+        return xr.DataArray(data, dims=["trainId", "Time"], attrs={"units": "ns"})
 
     @_cache(name="Space axis")
     def _space_axis(self):
@@ -610,9 +620,7 @@ class _StreakCamera(SaveFriend):
         axis = axis - axis.mean()
 
         data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
-        return xr.DataArray(
-            data, dims=["trainId", "Space"], attrs={"units": "um"}
-        )
+        return xr.DataArray(data, dims=["trainId", "Space"], attrs={"units": "um"})
 
     def plot(self, train_id, ax=None, fig=None):
         self.compute()
@@ -629,6 +637,7 @@ class _StreakCamera(SaveFriend):
 
         if ax is None:
             import matplotlib.pyplot as plt
+
             fig, ax = plt.subplots(figsize=(9, 5))
 
         tid_str = f"{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}"
@@ -677,18 +686,26 @@ class _StreakCamera(SaveFriend):
 
         super().save(fpath, self.name)
         self.cal.save(fpath)
-        self.dipole.save(fpath, f'{self.name}/dipole')
+        self.dipole.save(fpath, f"{self.name}/dipole")
 
-    def to_png(self, output='.', filename="p{proposal:06}_r{run:04}_{name}.png", plots_per_row=1):
+    def to_png(
+        self,
+        output=".",
+        filename="p{proposal:06}_r{run:04}_{name}.png",
+        plots_per_row=1,
+    ):
         meta = self.run.run_metadata()
         proposal = meta.get("proposalNumber", "")
         run = meta.get("runNumber", "")
-        fpath = f"{output}/{filename.format(name=self.name, proposal=proposal, run=run)}"
+        fpath = (
+            f"{output}/{filename.format(name=self.name, proposal=proposal, run=run)}"
+        )
 
         self.compute()
         n_images = len(self.train_ids.value)
 
         import matplotlib.pyplot as plt
+
         rows = ceil(n_images / plots_per_row)
         cols = min(n_images, plots_per_row)
 
@@ -703,9 +720,9 @@ class _StreakCamera(SaveFriend):
 
         # Turn off any unused subplots
         for i in range(n_images, len(axes)):
-            axes[i].axis('off')
+            axes[i].axis("off")
 
-        fig.savefig(fpath, bbox_inches='tight', format='png')
+        fig.savefig(fpath, bbox_inches="tight", format="png")
 
 
 class _VISAR(_StreakCamera):
@@ -749,9 +766,7 @@ class _KEPLER(_VISAR):
     def image(self):
         data = self.detector.ndarray()
         data = np.rot90(data, 1, axes=(1, 2))
-        data = np.array(
-            [np.fliplr(remap(frame, *self.cal.map())) for frame in data]
-        )
+        data = np.array([np.fliplr(remap(frame, *self.cal.map())) for frame in data])
         return xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
 
 
