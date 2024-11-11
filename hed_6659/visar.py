@@ -18,6 +18,7 @@ import toml
 import xarray as xr
 from extra_data import DataCollection, KeyData, by_id
 from scipy.interpolate import griddata
+from scipy.stats import median_abs_deviation
 
 __all__ = ['VISAR']
 
@@ -92,16 +93,55 @@ def format_train_ids(data):
     return out
 
 
+def largest_group(arr):
+    """
+    Find the largest contiguous group in a sorted array of integers.
+
+    Parameters:
+        arr (numpy.ndarray): 1D sorted array of integers
+
+    Returns:
+        array containing the contiguous sequence
+    """
+    if len(arr) == 0:
+        return None
+
+    current_start = 0
+    current_length = 1
+    start = 0
+    length = 1
+
+    for i in range(1, len(arr)):
+        if arr[i] == arr[i-1] + 1:
+            current_length += 1
+        else:
+            if current_length > length:
+                length = current_length
+                start = current_start
+            current_start = i
+            current_length = 1
+
+    # Check one last time in case the longest sequence was at the end
+    if current_length > length:
+        length = current_length
+        start = current_start
+
+    return arr[start:start + length]
+
+
 def _cache(name, py_type=False):
     """Decorator to cache the result of a method in the (xarray) dataset.
 
     Parameters:
-    - name (str): The name under which the result will be cached in the dataset.
-    - py_type (bool): If True, the cached result will be converted to a Python type.
+        name (str): The name under which the result will be cached in
+    the dataset.
+        py_type (bool): If True, the cached result will be converted
+    to a Python type.
 
-    The decorator checks if the result for the given name is already cached in the dataset.
-    If not, it calls the decorated function to compute the result, caches it, and then returns it.
-    If py_type is True, the result is converted to a python type before returning.
+    The decorator checks if the result for the given name is already cached in
+    the dataset. If not, it calls the decorated function to compute the result,
+    caches it, and then returns it. If py_type is True, the result is converted
+    to a python type before returning.
 
     note: the class must have a dataset object of type xarray.Dataset defined.
     """
@@ -206,7 +246,6 @@ class DIPOLE(SaveFriend):
         data.attrs["units"] = energy.units
         return data
 
-    def trace(self, dt: float = 0.2):
     def trace(self, signal_index: int = 40000, dt: float = 0.2, margin: int = 5):
         """
         signal_index: int, index of the signal start in the trace
@@ -258,6 +297,52 @@ class DIPOLE(SaveFriend):
             attrs={'units': 'W'},
         )
     
+    def trace1(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
+        """
+        signal_index: int, index of the signal start in the trace
+        dt: float, sample period [nanoseconds / sample]
+        margin: int, additional margin around the dipole signal [nanoseconds]
+        """
+        margin = int(margin / dt)  # margin in # sample
+
+        traces = self.run[
+            "HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"
+        ].xarray()
+
+        energy = self.energy()
+        energy = energy[energy.type=='shot'].data
+
+        noise_std = median_abs_deviation(traces, axis=1, scale='normal')
+        threshold = traces.median(axis=1) + threshold_sigma * noise_std
+
+        power_traces = []
+        for trace, thresh, nrj in zip(traces, threshold, energy):
+            indices = largest_group(np.where(trace > thresh)[0])
+            if indices.size == 0:
+                power_traces.append(np.array([]))
+                continue
+            start, stop = indices[0], min(trace.size, indices[-1] + 1)
+
+            dipole_duration = (stop - start) * dt * 1e-9  # [s]
+            scaling = nrj / (trace[start:stop].sum() * dipole_duration)
+            power = trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
+            power_traces.append(power)
+
+        longest_trace = max(power_traces, key=len).size
+        time_coord = (np.arange(longest_trace) - margin) * dt  # [ns]
+
+        out = np.full((traces.shape[0], longest_trace), np.nan)
+        for idx, power in enumerate(power_traces):
+            out[idx] = power
+
+        return xr.DataArray(
+            out,
+            coords={'time [ns]': time_coord, 'trainId': traces.trainId},
+            dims=['trainId', 'time [ns]'],
+            name='Power',
+            attrs={'units': 'W'},
+        )
+
 class CalibrationData:
     def __init__(self, visar, file_path=None):
         self.visar = visar
@@ -607,7 +692,6 @@ class _StreakCamera(SaveFriend):
         rows = ceil(n_images / plots_per_row)
         cols = min(n_images, plots_per_row)
 
-        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 3 * rows))
         fig, axes = plt.subplots(rows, cols, figsize=(9 * cols, 5 * rows))
         fig.subplots_adjust(hspace=0.4, wspace=0.4)
 
