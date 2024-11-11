@@ -167,9 +167,10 @@ def _cache(name, py_type=False):
 
 
 class SaveFriend:
-    """functions to compute cached data and save Dataset to hdf5
-
-    The main class must define a dataset object.
+    """ functions to compute cached data and save Dataset to hdf5
+    
+    The main class must define a (xr.Dataset) dataset and a
+    (extra_data.DataCollection) run object.
     """
 
     def _quantities(self):
@@ -180,6 +181,14 @@ class SaveFriend:
             for name, method in methods
             if getattr(method, "_is_cached", False)
         ]
+
+    @cached_property
+    def run_number(self):
+        return self.run.run_metadata().get("runNumber", "?")
+
+    @cached_property
+    def proposal_number(self):
+        return self.run.run_metadata().get("proposalNumber", "?")
 
     def compute(self, profile=False):
         for name, quantity in self._quantities():
@@ -206,10 +215,7 @@ class DIPOLE(SaveFriend):
 
     def format(self, compact=False):
         """Format information about the VISAR component."""
-        meta = self.run.run_metadata()
-        run_str = (
-            f'p{meta.get("proposalNumber", "?"):06}, r{meta.get("runNumber", "?"):04}'
-        )
+        run_str = f'p{self.proposal_number:06}, r{self.run_number:04}'
 
         if compact:
             return f"{self.name}, {run_str}"
@@ -443,10 +449,7 @@ class _StreakCamera(SaveFriend):
 
     def format(self, compact=False):
         """Format information about the VISAR component."""
-        meta = self.run.run_metadata()
-        run_str = (
-            f'p{meta.get("proposalNumber", "?"):06}, r{meta.get("runNumber", "?"):04}'
-        )
+        run_str = f'p{self.proposal_number:06}, r{self.run_number:04}'
         info_str = f"{self.name} properties for {run_str}:\n"
 
         if compact:
@@ -643,7 +646,7 @@ class _StreakCamera(SaveFriend):
         ax.grid(which="minor", color="k", linestyle=":", linewidth=1, alpha=1)
 
         fig.colorbar(im, ax=ax)
-        # fig.tight_layout()
+        fig.tight_layout()
 
         return ax
 
@@ -659,14 +662,12 @@ class _StreakCamera(SaveFriend):
                             which can include placeholders for proposal and run
                             numbers.
         """
-        meta = self.run.run_metadata()
-        proposal = meta.get("proposalNumber", "")
-        run = meta.get("runNumber", "")
-        fpath = f"{output}/{filename.format(proposal=proposal, run=run)}"
+        fname = filename.format(proposal=self.proposal_number, run=self.run_number)
+        fpath = Path(output) / fname
 
         super().to_h5(fpath, self.name)
         self.cal.to_h5(fpath, f"{self.name}/calibration")
-        self.dipole.to_h5(fpath, f"{self.name}/dipole")
+        self.dipole.to_h5(fpath, f"{self.name}/DiPOLE")
 
     def to_png(
         self,
@@ -686,12 +687,8 @@ class _StreakCamera(SaveFriend):
                             which can include placeholders for proposal, run numbers, and the name.
             plots_per_row (int): The number of plots to display per row in the saved figure.
         """
-        meta = self.run.run_metadata()
-        proposal = meta.get("proposalNumber", "")
-        run = meta.get("runNumber", "")
-        fpath = (
-            f"{output}/{filename.format(name=self.name, proposal=proposal, run=run)}"
-        )
+        fname = filename.format(name=self.name, proposal=self.proposal_number, run=self.run_number)
+        fpath = Path(output) / fname
 
         self.compute()
         n_images = len(self.train_ids.value)
