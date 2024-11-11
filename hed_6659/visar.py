@@ -310,7 +310,7 @@ class DIPOLE(SaveFriend):
 
         out = np.full((traces.shape[0], longest_trace), np.nan)
         for idx, power in enumerate(power_traces):
-            out[idx] = power
+            out[idx, :power.size] = power
 
         return xr.DataArray(
             out,
