@@ -17,6 +17,7 @@ import numpy as np
 import toml
 import xarray as xr
 from extra_data import DataCollection, KeyData, by_id
+from extra_data.exceptions import PropertyNameError, SourceNameError
 from scipy.interpolate import griddata
 from scipy.stats import median_abs_deviation
 
@@ -104,7 +105,7 @@ def largest_group(arr):
         array containing the contiguous sequence
     """
     if len(arr) == 0:
-        return None
+        return arr[0:0]
 
     current_start = 0
     current_length = 1
@@ -187,7 +188,7 @@ class SaveFriend:
             if profile:
                 print(f"{name}: {round((perf_counter()-t0)*1000, 3)}ms")
 
-    def save(self, path, group):
+    def to_h5(self, path, group):
         self.compute()
         self.dataset.to_netcdf(
             path=path, mode="a", group=group, format="NETCDF4", engine="h5netcdf"
@@ -196,7 +197,6 @@ class SaveFriend:
 
 class DIPOLE(SaveFriend):
     def __init__(self, visar, run, name="DiPOLE"):
-        self.visar = visar
         self.name = name
         self.run = run
         self.dataset = xr.Dataset(coords=visar.coords)
@@ -219,7 +219,11 @@ class DIPOLE(SaveFriend):
         for name, quantity in self._quantities():
             if name.startswith("_"):
                 continue
+            if name == 'trace':
+                continue
+
             value = quantity()
+            value = value[value.type == 'shot']
             name = value.name
             units = value.attrs.get("units", "")
             # only show a single value if it's not changing
@@ -250,70 +254,33 @@ class DIPOLE(SaveFriend):
         data.attrs["units"] = energy.units
         return data
 
-    def trace(self, signal_index: int = 40000, dt: float = 0.2, margin: int = 5):
+    @_cache(name="Trace")
+    def trace(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
         """
-        signal_index: int, index of the signal start in the trace
-        dt: float, sample period [nanoseconds / sample]
-        margin: int, additional margin around the dipole signal [nanoseconds]
-        """
-        margin = int(margin / dt)  # margin in # sample
+        Find DiPOLE power signals
 
-        traces = self.run[
-            "HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"
-        ].xarray()
+        Parameters:
+            threshold_sigma (float): The number of standard deviations above the median
+                to use as the threshold for detecting significant signals in the traces.
+                Default is 3.0.
+            dt (float): The sample period in nanoseconds per sample. This is used to
+                convert sample indices to time coordinates. Default is 0.2.
+            margin (int): The additional margin in nanoseconds around the detected dipole
+                signal. This is used to extend the trace. Default is 5.
 
-        # max value of each trainId, up to signal_index samples
-        background = traces[:, :signal_index].max(axis=1)
-
-        def min_max_indices(row, threshold):
-            """get first and last index of row above threshold"""
-            indices = np.where(row > threshold)[0]
-            print(len(indices))
-            if indices.size == 0:  # If no elements meet the condition
-                return -1, -1
-            return indices[0], indices[-1]
-
-        energy = self.energy()
-        energy = energy[energy.type == "shot"].data
-
-        power_traces = []
-        for trace, bg, nrj in zip(traces, background, energy):
-            start, stop = min_max_indices(trace, bg)
-            samples = stop - start
-
-            dipole_duration = samples * dt * 1e-9  # [s]
-            scaling = nrj / (trace[start : stop + 1].sum() * dipole_duration)
-            power = (
-                trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
-            )
-            power_traces.append(power)
-
-        longest_trace = max(power_traces, key=len).size
-        time_coord = (np.arange(longest_trace) - margin) * dt  # [ns]
-
-        out = np.full((traces.shape[0], longest_trace), np.nan)
-        for idx, power in enumerate(power_traces):
-            out[idx] = power
-
-        return xr.DataArray(
-            out,
-            coords={"time [ns]": time_coord, "trainId": traces.trainId},
-            dims=["trainId", "time [ns]"],
-            name="Power",
-            attrs={"units": "W"},
-        )
-
-    def trace1(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
-        """
-        signal_index: int, index of the signal start in the trace
-        dt: float, sample period [nanoseconds / sample]
-        margin: int, additional margin around the dipole signal [nanoseconds]
+        Returns:
+            xr.DataArray: A DataArray containing the extracted power signals for each
+            train ID, with time coordinates adjusted according to the specified margin.
+            The dimensions are ["trainId", "time [ns]"], and the data is in Watts (W).
         """
         margin = int(margin / dt)  # margin in # sample
 
-        traces = self.run[
-            "HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"
-        ].xarray()
+        try:
+            scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
+        except (SourceNameError, PropertyNameError):
+            return xr.DataArray([])
+
+        traces = scope.xarray()
 
         energy = self.energy()
         energy = energy[energy.type == "shot"].data
@@ -325,7 +292,6 @@ class DIPOLE(SaveFriend):
         for trace, thresh, nrj in zip(traces, threshold, energy):
             indices = largest_group(np.where(trace > thresh)[0])
             if indices.size == 0:
-                power_traces.append(np.array([]))
                 continue
             start, stop = indices[0], min(trace.size, indices[-1] + 1)
 
@@ -335,6 +301,9 @@ class DIPOLE(SaveFriend):
                 trace[max(0, start - margin) : min(stop + margin, trace.size)] * scaling
             )
             power_traces.append(power)
+
+        if len(power_traces) == 0:
+            return xr.DataArray([])
 
         longest_trace = max(power_traces, key=len).size
         time_coord = (np.arange(longest_trace) - margin) * dt  # [ns]
@@ -431,11 +400,11 @@ class CalibrationData:
             data["Dewarp target"] = (["dim_0", "dim_1"], self.map()[1])
         return data
 
-    def save(self, file_path):
+    def to_h5(self, file_path, group):
         self.dataset().to_netcdf(
             path=file_path,
             mode="a",
-            group=f"{self.visar.name}/calibration",
+            group=group,
             format="NETCDF4",
             engine="h5netcdf",
         )
@@ -678,15 +647,26 @@ class _StreakCamera(SaveFriend):
 
         return ax
 
-    def save(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
+    def to_h5(self, output=".", filename="VISAR_p{proposal:06}_r{run:04}.h5"):
+        """Save the corrected VISAR data to an HDF5 file.
+
+        This method saves the VISAR object, including, calibration data, and
+        dipole data, to an HDF5 file, in the netCDF format.
+
+        Parameters:
+            output (str): The directory where the HDF5 file will be saved.
+            filename (str): The filename format for the saved HDF5 file,
+                            which can include placeholders for proposal and run
+                            numbers.
+        """
         meta = self.run.run_metadata()
         proposal = meta.get("proposalNumber", "")
         run = meta.get("runNumber", "")
         fpath = f"{output}/{filename.format(proposal=proposal, run=run)}"
 
-        super().save(fpath, self.name)
-        self.cal.save(fpath)
-        self.dipole.save(fpath, f"{self.name}/dipole")
+        super().to_h5(fpath, self.name)
+        self.cal.to_h5(fpath, f"{self.name}/calibration")
+        self.dipole.to_h5(fpath, f"{self.name}/dipole")
 
     def to_png(
         self,
@@ -694,6 +674,18 @@ class _StreakCamera(SaveFriend):
         filename="p{proposal:06}_r{run:04}_{name}.png",
         plots_per_row=1,
     ):
+        """Save the VISAR plots to PNG files.
+
+        This method generates and saves plots for each train ID in the VISAR
+        dataset to PNG files. The output filename can include placeholders for
+        proposal and run numbers, as well as the name of the VISAR component.
+
+        Parameters:
+            output (str): The directory where the PNG files will be saved.
+            filename (str): The filename format for the saved PNG files,
+                            which can include placeholders for proposal, run numbers, and the name.
+            plots_per_row (int): The number of plots to display per row in the saved figure.
+        """
         meta = self.run.run_metadata()
         proposal = meta.get("proposalNumber", "")
         run = meta.get("runNumber", "")
@@ -775,6 +767,25 @@ class _VISAR_1w(_VISAR):
 
 
 def VISAR(run, name="KEPLER1", config_file=None):
+    """Create a VISAR object based on the specified device name.
+
+    Parameters:
+        run (DataCollection): The run data collection object containing the data
+            for the VISAR device. name (str): The name of the VISAR device to
+            instantiate. Must be one of "KEPLER1", "KEPLER2", "VISAR_1w", "SOP".
+            Default is "KEPLER1".
+        config_file (str, optional): Path to the
+            configuration file for the VISAR device. If provided, it will be
+            used to initialize the CalibrationData.
+
+    Returns:
+        _StreakCamera: An instance of the appropriate VISAR class based on the
+            device name.
+
+    Raises:
+        ValueError: If the provided name is not one of the valid VISAR device
+            names.
+    """
     if name == "SOP":
         _V = _StreakCamera
     elif name == "VISAR_1w":
@@ -798,4 +809,4 @@ if __name__ == "__main__":
 
         for train_id in vis.train_ids.value:
             vis.plot(train_id)
-        vis.save()
+        vis.to_h5()
