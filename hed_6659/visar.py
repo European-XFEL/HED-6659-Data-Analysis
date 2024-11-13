@@ -71,12 +71,20 @@ def resize(image, row_factor=2, column_factor=2):
 
 def dipole_ppu_open(run: DataCollection):
     """Get trainIds in run with dipole PPU open"""
-    return (
-        run["HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN", "hardwareStatusBitField"]
-        .xarray()
-        .where(lambda x: x == DipolePPU.OPEN.value, drop=True)
-        .trainId
-    )
+    try:
+        return (
+            run["HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN", "hardwareStatusBitField"]
+            .xarray()
+            .where(lambda x: x == DipolePPU.OPEN.value, drop=True)
+            .trainId
+        )
+    except (SourceNameError, PropertyNameError):
+        return (
+            run["HED_HPLAS_HET/SHUTTER/DIPOLE_PPU", "isOpened"]
+            .xarray()
+            .where(lambda x: x == 1, drop=True)
+            .trainId
+        )
 
 
 def format_train_ids(data):
@@ -261,7 +269,7 @@ class DIPOLE(SaveFriend):
         return data
 
     @_cache(name="Trace")
-    def trace(self, threshold_sigma: float = 3.0, dt: float = 0.2, margin: int = 5):
+    def trace(self, threshold_sigma: float = 3.0, margin: int = 5):
         """
         Find DiPOLE power signals
 
@@ -269,8 +277,6 @@ class DIPOLE(SaveFriend):
             threshold_sigma (float): The number of standard deviations above the median
                 to use as the threshold for detecting significant signals in the traces.
                 Default is 3.0.
-            dt (float): The sample period in nanoseconds per sample. This is used to
-                convert sample indices to time coordinates. Default is 0.2.
             margin (int): The additional margin in nanoseconds around the detected dipole
                 signal. This is used to extend the trace. Default is 5.
 
@@ -279,6 +285,8 @@ class DIPOLE(SaveFriend):
             train ID, with time coordinates adjusted according to the specified margin.
             The dimensions are ["trainId", "time [ns]"], and the data is in Watts (W).
         """
+        sample_rate = self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST', 'samplerate'].as_single_value()  # Hz
+        dt = 1e9 / sample_rate  # [ns]
         margin = int(margin / dt)  # margin in # sample
 
         try:
