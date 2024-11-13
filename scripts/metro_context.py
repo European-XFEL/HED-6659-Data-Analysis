@@ -6,9 +6,13 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from metropc.context import View, ViewGroup
+from metropc.context import View, ViewGroup, parameters
 from metropc.viewdef import Parameter
 from scipy.interpolate import griddata
+
+parameters(
+    calibration_file = "/gpfs/exfel/exp/HED/202405/p006746/usr/Shared/metro/visar_calibration_values_6659.toml"
+)
 
 
 def remove_border(data, value=0., ratio=1):
@@ -87,29 +91,27 @@ class Settings:
         return self._delay(self['pixDipole_0ns'][f'{sweep_time}ns'], sweep_time)
 
 
-class VISARBase(ViewGroup):
+class StreakCamera(ViewGroup):
     SWEEP_SPEED = {1: 50, 2: 20, 3: 10, 4: 5, 5: 1, 6: 100}
 
-    calibration_file: Parameter = "/gpfs/exfel/data/user/tmichela/tmp/visar_calibration_values_6656.toml"
     rot90: Parameter = 1
     fliplr: Parameter = False
     flipud: Parameter = False
     downsample: Parameter = 4
 
-    arm: Parameter = 'COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2'
     control: Parameter = 'HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2'
     trigger: Parameter = 'HED_EXP_VISAR/TSYS/ARM_2_TRIG'
     detector: Parameter = 'HED_SYDOR_TEST/CAM/KEPLER_2:output'
 
     def __init__(self, *args, prefix="KEPLER1", **kwargs):
         super().__init__(*args, prefix=f'{prefix}/', **kwargs)
-        self._ref = Settings(self.calibration_file, prefix)
+        self._ref = Settings(calibration_file, prefix)
         self.t0 = time()
 
     @property
     def ref(self):
-        if self.calibration_file != self._ref.file_path:
-            self._ref = Settings(self.calibration_file, self.prefix.rstrip('/'))
+        if calibration_file != self._ref.file_path:
+            self._ref = Settings(calibration_file, self.prefix.rstrip('/'))
         return self._ref
 
     @lru_cache()
@@ -120,7 +122,7 @@ class VISARBase(ViewGroup):
         return np.poly1d(time_poly[::-1])(pixel_index)
 
     @View.Image(name='{prefix}rawData', hidden=True)
-    def raw_data(self, data: '{detector}:daqOutput[data.image.pixels]'):
+    def raw_data(self, data: '{detector}[data.image.pixels]'):
         self.t0 = time()
 
         if self.rot90:
@@ -162,29 +164,31 @@ class VISARBase(ViewGroup):
         train_id: '{prefix}trainId',
         dipole_delay: 'view#dipoleDelay',
         dipole_energy: 'view#dipoleEnergy',
-        etalon_thickness: '{arm}.etalonThickness',
-        motor_displacement: '{arm}.motorDisplacement',
-        sensitivity: '{arm}.sensitivity',
         sweep_delay: '{prefix}sweepDelay',
         sweep_time: '{prefix}sweepTime',
-        temporal_delay: '{arm}.temporalDelay',
-        zero_delay_position: '{arm}.zeroDelayPosition',
     ):
         return f"""\
             <div style="text-align: left">
                 <b>SHOT - TrainID:</b> {train_id} <br><br>
-                <b>Dipole delay:</b>: {dipole_delay} ns <br>
-                <b>Dipole energy:</b>: {dipole_energy:.3f} J <br>
+                <b>Dipole delay:</b> {round(dipole_delay, 3)} ns <br>
+                <b>Dipole energy:</b> {dipole_energy:.3f} J <br>
                 <br>
-                <b>etalon thickness:</b>: {etalon_thickness:.3f} mm <br>
-                <b>Motor displacement:</b>: {motor_displacement:.3f} mm <br>
-                <b>Sensitivity:</b>: {sensitivity:.3f} m / s <br>
-                <b>Sweep delay:</b>: {sweep_delay:.3f} ns <br>
-                <b>Sweep time:</b>: {sweep_time} µs <br>
-                <b>Temporal delay:</b>: {temporal_delay:.3f} ns <br>
-                <b>Zero delay position:</b>: {zero_delay_position:.3f} mm <br>
+                <b>Sweep delay:</b> {sweep_delay:.3f} ns <br>
+                <b>Sweep time:</b> {sweep_time} µs <br>
             </div>
             """
+
+    @View.Image(name='{prefix}correctedShot')
+    def corrected_data_shot(self,
+                            data: '{prefix}rawShot',
+                            sweep_time: '{prefix}sweepTime',
+                            xray_delay: '{prefix}xrayDelay',
+                            dipole_delay: 'view#dipoleDelay'):
+        data = cv2.resize(data, (data.shape[1] * 2, data.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+        data = np.flipud(np.fliplr(data))
+        res = self._labelled(data, sweep_time, xray_delay, dipole_delay)
+        print('>>', self.__class__.__name__, round(time() - self.t0, 3))
+        return res
 
     def _labelled(self, data, sweep_time, xray_delay, dipole_delay):
         slice_ = remove_border(data, ratio=self.downsample)
@@ -207,6 +211,39 @@ class VISARBase(ViewGroup):
         )
 
 
+class VISARBase(StreakCamera):
+    arm: Parameter = 'COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2'
+
+    @View.Scalar(name='{prefix}shotInfo')
+    def info(
+        train_id: '{prefix}trainId',
+        dipole_delay: 'view#dipoleDelay',
+        dipole_energy: 'view#dipoleEnergy',
+        etalon_thickness: '{arm}.etalonThickness',
+        motor_displacement: '{arm}.motorDisplacement',
+        sensitivity: '{arm}.sensitivity',
+        sweep_delay: '{prefix}sweepDelay',
+        sweep_time: '{prefix}sweepTime',
+        temporal_delay: '{arm}.temporalDelay',
+        zero_delay_position: '{arm}.zeroDelayPosition',
+    ):
+        return f"""\
+            <div style="text-align: left">
+                <b>SHOT - TrainID:</b> {train_id} <br><br>
+                <b>Dipole delay:</b> {round(dipole_delay, 3)} ns <br>
+                <b>Dipole energy:</b> {dipole_energy:.3f} J <br>
+                <br>
+                <b>etalon thickness:</b> {etalon_thickness:.3f} mm <br>
+                <b>Motor displacement:</b> {motor_displacement:.3f} mm <br>
+                <b>Sensitivity:</b> {sensitivity:.3f} m / s <br>
+                <b>Sweep delay:</b> {sweep_delay:.3f} ns <br>
+                <b>Sweep time:</b> {sweep_time} µs <br>
+                <b>Temporal delay:</b> {temporal_delay:.3f} ns <br>
+                <b>Zero delay position:</b> {zero_delay_position:.3f} mm <br>
+            </div>
+            """
+
+
 class VISAR(VISARBase):
     @View.Image(name='{prefix}correctedShot')
     def corrected_data_shot(self,
@@ -226,24 +263,12 @@ class VISAR(VISARBase):
 class VISAR_1w(VISARBase):
     fliplr: Parameter = True
 
-    @View.Image(name='{prefix}correctedShot')
-    def corrected_data_shot(self,
-                            data: '{prefix}rawShot',
-                            sweep_time: '{prefix}sweepTime',
-                            xray_delay: '{prefix}xrayDelay',
-                            dipole_delay: 'view#dipoleDelay'):
-        data = cv2.resize(data, (data.shape[1] * 2, data.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
-        data = np.flipud(np.fliplr(data))
-        res = self._labelled(data, sweep_time, xray_delay, dipole_delay)
-        print('>>', self.__class__.__name__, round(time() - self.t0, 3))
-        return res
-
 
 kepler1 = VISAR(
     arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_1',
     control='HED_SYDOR_TEST/CTRL/CONTROL_UNIT_1',
     trigger='HED_EXP_VISAR/TSYS/ARM_1_TRIG',
-    detector='HED_SYDOR_TEST/CAM/KEPLER_1',
+    detector='HED_SYDOR_TEST/CAM/KEPLER_1:output',
     prefix="KEPLER1"
 )
 
@@ -251,14 +276,21 @@ kepler2 = VISAR(
     arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2',
     control='HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2',
     trigger='HED_EXP_VISAR/TSYS/ARM_2_TRIG',
-    detector='HED_SYDOR_TEST/CAM/KEPLER_2',
+    detector='HED_SYDOR_TEST/CAM/KEPLER_2:output',
     prefix="KEPLER2"
 )
 
 visar1w = VISAR_1w(
     arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_3',
     trigger='HED_EXP_VISAR/TSYS/ARM_3_TRIG',
-    detector='HED_EXP_VISAR/EXP/ARM_3_STREAK',
+    detector='HED_EXP_VISAR/EXP/ARM_3_STREAK:output',
     ctrl='HED_EXP_VISAR/EXP/ARM_3_STREAK',
     prefix='VISAR_1w',
+)
+
+SOP = StreakCamera(
+    trigger="HED_EXP_VISAR/TSYS/SOP_TRIG",
+    detector="HED_EXP_VISAR/EXP/SOP_STREAK:output",
+    ctrl="HED_EXP_VISAR/EXP/SOP_STREAK",
+    prefix="SOP",
 )
