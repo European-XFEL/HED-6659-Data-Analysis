@@ -21,6 +21,8 @@ from extra_data.exceptions import PropertyNameError, SourceNameError
 from scipy.interpolate import griddata
 from scipy.stats import median_abs_deviation
 
+from .utils import ppu_trigger, fel_trigger, dipole_trigger, dipole_ppu_open
+
 __all__ = ["VISAR"]
 
 VISAR_DEVICES = {
@@ -50,11 +52,6 @@ VISAR_DEVICES = {
 }
 
 
-class DipolePPU(Enum):
-    OPEN = np.uint32(34)
-    CLOSED = np.uint32(4130)
-
-
 def remap(image, source, target):
     return cv2.remap(
         image, source, target, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT
@@ -67,24 +64,6 @@ def resize(image, row_factor=2, column_factor=2):
         (image.shape[1] * row_factor, image.shape[0] * column_factor),
         interpolation=cv2.INTER_CUBIC,
     )
-
-
-def dipole_ppu_open(run: DataCollection):
-    """Get trainIds in run with dipole PPU open"""
-    try:
-        return (
-            run["HED_HPLAS_HET/SWITCH/DIPOLE_PPU_OPEN", "hardwareStatusBitField"]
-            .xarray()
-            .where(lambda x: x == DipolePPU.OPEN.value, drop=True)
-            .trainId
-        )
-    except (SourceNameError, PropertyNameError):
-        return (
-            run["HED_HPLAS_HET/SHUTTER/DIPOLE_PPU", "isOpened"]
-            .xarray()
-            .where(lambda x: x == 1, drop=True)
-            .trainId
-        )
 
 
 def format_train_ids(data):
@@ -679,6 +658,8 @@ class _StreakCamera(SaveFriend):
         self.cal.to_h5(fpath, f"{self.name}/calibration")
         self.dipole.to_h5(fpath, f"{self.name}/DiPOLE")
 
+        fpath.chmod(0o777)
+
     def to_png(
         self,
         output=".",
@@ -722,6 +703,14 @@ class _StreakCamera(SaveFriend):
             axes[i].axis("off")
 
         fig.savefig(fpath, bbox_inches="tight", format="png")
+        fpath.chmod(0o777)
+
+    def to_tiff(
+        self,
+        output=".",
+        filename="p{proposal:06}_r{run:04}_{name}.tiff",
+    ):
+        ...
 
 
 class _VISAR(_StreakCamera):
