@@ -76,6 +76,9 @@ def format_train_ids(data):
     This function takes a 1D array, it then formats the output to show the first
     element and formats the subsequent elements to only show the changing digits
     """
+    if len(data) == 0:
+        return "[]"
+
     max_diff = (data - data[0]).max()
     ndigits = len(str(max_diff))
     out = f"[{data[0]}"

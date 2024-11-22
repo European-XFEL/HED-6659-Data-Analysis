@@ -12,6 +12,7 @@ dependencies = [
     "extra-data",
     "fabio",
     "h5py",
+    "h5netcdf",
     "hexrd @git+https://github.com/HEXRD/hexrd.git",
     "matplotlib",
     "numpy",
