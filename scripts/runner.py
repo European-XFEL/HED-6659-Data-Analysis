@@ -104,9 +104,10 @@ def process(proposal, run):
 
 if __name__ == '__main__':
     import sys
-    proposal, run = int(sys.argv[1]), int(sys.argv[2])
+    proposal, run, output = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 
-    OUTPUT = OUTPUT / f'r{run:04}'
+    global OUTPUT
+    OUTPUT = Path(output) / f'r{run:04}'
     OUTPUT.mkdir(parents=True, exist_ok=True)
     (OUTPUT / "VISAR").mkdir()
     (OUTPUT / "VAREX").mkdir()

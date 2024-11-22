@@ -512,6 +512,7 @@ class _StreakCamera(SaveFriend):
         ).trainId.data
         info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
         info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
+        info_str += f"\n\n Sample ID: {', '.join(sample_name(self.run))}"
         return info_str
 
     @_cache(name="Difference X-drive")

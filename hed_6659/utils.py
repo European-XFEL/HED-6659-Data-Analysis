@@ -74,15 +74,20 @@ def dipole_ppu_open(run: DataCollection):
 
 
 @cache
-def sample_name(run, train_id):
-    try:
+def sample_name(run, train_id=None):
+    if "COMP_HED_IA2_DLC/MDL/DlcSampleMover" not in run.control_sources:
+        return "-"
+
+    if train_id is not None:
         return (
             run["COMP_HED_IA2_DLC/MDL/DlcSampleMover", "sampleName"][by_id[[train_id]]]
             .ndarray()[0]
             .decode()
         )
-    except (SourceNameError, PropertyNameError):
-        return "-"
+
+    samples = run["COMP_HED_IA2_DLC/MDL/DlcSampleMover", "sampleName"].ndarray()
+    samples = set(samples)
+    return sorted(s.decode() for s in samples)
 
 
 def save_tiff(array, output):

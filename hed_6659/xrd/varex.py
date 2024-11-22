@@ -169,7 +169,7 @@ class XRDProcessor:
         save_tiff(self.varex2.frame(train_id), self.output / f'VAREX_2_tid_{train_id}_{kind}.tiff')
 
         # save poni
-        self.ai.write(self.output / f'{train_id}.poni')
+        self.ai.write(self.output / 'VAREX.poni')
 
         if image is None:
             return  # projection failed, we return early
