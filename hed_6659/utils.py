@@ -1,5 +1,6 @@
 from enum import Enum
 from functools import cache
+from PIL import Image
 
 import numpy as np
 from extra_data import DataCollection, by_id
@@ -28,7 +29,10 @@ def ppu_trigger(run: DataCollection, offset: int=0) -> DataCollection:
 @cache
 def dipole_trigger(run: DataCollection, offset: int=0) -> DataCollection:
     """Select train IDs based on Dipole trigger information from a DataCollection."""
-    seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_DIPOLE", "sequenceStart.value"].ndarray()
+    if "HED_PLAYGROUND/MDL/MASTER_TIMER_DIPOLE" not in run.control_sources:
+        return np.array([])
+
+    seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_DIPOLE", "sequenceStart"].ndarray()
     start_train_ids = np.unique(seq_start)[1:] + offset
 
     # return run.select_trains(by_id[start_train_ids])
@@ -38,7 +42,7 @@ def dipole_trigger(run: DataCollection, offset: int=0) -> DataCollection:
 @cache
 def fel_trigger(run: DataCollection, offset: int=0) -> DataCollection:
     """Select train IDs based on Dipole trigger information from a DataCollection."""
-    seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_PPU", "sequenceStart.value"].ndarray()
+    seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_PPU", "sequenceStart"].ndarray()
     start_train_ids = np.unique(seq_start)[1:] + offset
 
     # return run.select_trains(by_id[start_train_ids])
@@ -79,3 +83,7 @@ def sample_name(run, train_id):
         )
     except (SourceNameError, PropertyNameError):
         return "-"
+
+
+def save_tiff(array, output):
+    Image.fromarray(np.nan_to_num(array)).save(output)
