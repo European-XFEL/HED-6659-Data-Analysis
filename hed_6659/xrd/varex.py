@@ -1,7 +1,6 @@
 import logging
 from dataclasses import dataclass
 from functools import cache
-from PIL import Image
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -11,7 +10,7 @@ from extra_data import by_id, open_run
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from .projection import Projection as ImageProjection
-from ..utils import ppu_trigger, dipole_ppu_open, dipole_trigger, fel_trigger, sample_name
+from ..utils import ppu_trigger, dipole_ppu_open, dipole_trigger, fel_trigger, sample_name, save_tiff
 
 log = logging.getLogger('__name__')
 
@@ -19,10 +18,6 @@ _VAREX_DEVICES = {
     'VAREX1': 'HED_EXP_VAREX/CAM/1:daqOutput',
     'VAREX2': 'HED_EXP_VAREX/CAM/2:daqOutput',
 }
-
-
-def save_tiff(array, output):
-    Image.fromarray(np.nan_to_num(array)).save(output)
 
 
 def trim_array(data, value=0., ratio=1):

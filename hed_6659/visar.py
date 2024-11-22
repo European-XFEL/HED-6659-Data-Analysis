@@ -4,8 +4,8 @@ Code to correct image deformation for the KEPLER (and others) streak cameras
 used for the VISAR device at the HED instrument at European XFEL.
 """
 
-from bisect import insort
-from enum import Enum
+import logging
+from bisect import insort, bisect_left
 from functools import cache, cached_property, wraps
 from inspect import getmembers, ismethod
 from math import ceil
@@ -16,14 +16,18 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from extra_data import DataCollection, KeyData, by_id
-from extra_data.exceptions import PropertyNameError, SourceNameError
+from extra_data import KeyData, by_id
+from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
 from scipy.stats import median_abs_deviation
 
-from .utils import ppu_trigger, fel_trigger, dipole_trigger, dipole_ppu_open
+from .utils import ppu_trigger, dipole_trigger, dipole_ppu_open, save_tiff, sample_name
 
 __all__ = ["VISAR"]
+
+
+log = logging.getLogger(__name__)
+
 
 VISAR_DEVICES = {
     "KEPLER1": {
@@ -117,6 +121,31 @@ def largest_group(arr):
     return arr[start : start + length]
 
 
+def find_closest(shot_ids, frames):
+    """
+    For each number in `shot_ids`, find the matching number in `frames`.
+    If a matching number is missing, find the closest larger number.
+
+    Parameters:
+      ids: List[int], sorted list of integers
+      frames: pd.Series, sorted series of integers
+
+    Returns:
+      List[int]: A list of numbers from `frames` corresponding to `shot_ids`
+    """
+    results = []
+
+    for num in shot_ids:
+        # Find the position to insert num in the sorted frames list
+        pos = bisect_left(frames, num)
+        if pos < len(frames):  # If within bounds
+            results.append(frames[pos])  # Add the found number or the closest larger number
+        else:
+            raise ValueError(f"No larger value found for {num} in frames")
+
+    return results
+
+
 def _cache(name, py_type=False):
     """Decorator to cache the result of a method in the (xarray) dataset.
 
@@ -182,7 +211,7 @@ class SaveFriend:
             t0 = perf_counter()
             quantity()
             if profile:
-                print(f"{name}: {round((perf_counter()-t0)*1000, 3)}ms")
+                log.info(f"{self.name}.{name}: {round((perf_counter()-t0)*1000, 3)}ms")
 
     def to_h5(self, path, group):
         self.compute()
@@ -264,15 +293,16 @@ class DIPOLE(SaveFriend):
             train ID, with time coordinates adjusted according to the specified margin.
             The dimensions are ["trainId", "time [ns]"], and the data is in Watts (W).
         """
+        try:
+            self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST']
+        except SourceNameError:
+            return xr.DataArray([])
+
         sample_rate = self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST', 'samplerate'].as_single_value()  # Hz
         dt = 1e9 / sample_rate  # [ns]
         margin = int(margin / dt)  # margin in # sample
 
-        try:
-            scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
-        except (SourceNameError, PropertyNameError):
-            return xr.DataArray([])
-
+        scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
         traces = scope.xarray()
 
         energy = self.energy()
@@ -529,14 +559,23 @@ class _StreakCamera(SaveFriend):
         tids = (
             self.run[self.visar["detector"]].drop_empty_trains().train_id_coordinates()
         )
-        ppu_open = dipole_ppu_open(self.run)
 
-        # train ID with data and ppu open
-        shot_ids = np.intersect1d(ppu_open, tids)
-        # train IDs with data and ppu closed
-        ref_ids = np.setdiff1d(tids, ppu_open)
+        # first we try to get the train IDs from the master trigger device
+        shot_ids = dipole_trigger(self.run)
+        if len(shot_ids) > 0:
+            shot_ids = find_closest(shot_ids, tids.tolist())
+            ref_ids = np.setdiff1d(tids, ppu_trigger(self.run) + dipole_trigger(self.run))
+        else:
+            # else we try to get the train IDs from correlation between detector frames and dipole open shutter
+            ppu_open = dipole_ppu_open(self.run)
 
-        train_ids = shot_ids.tolist()
+            # train ID with data and ppu open
+            shot_ids = np.intersect1d(ppu_open, tids).tolist()
+
+            # train IDs with data and ppu closed
+            ref_ids = np.setdiff1d(tids, ppu_open.data.tolist() + ppu_trigger(self.run))
+
+        train_ids = shot_ids
         types = ["shot"] * len(train_ids)
 
         if ref_ids.size > 0:
@@ -583,7 +622,7 @@ class _StreakCamera(SaveFriend):
         data = np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
         return xr.DataArray(data, dims=["trainId", "Space"], attrs={"units": "um"})
 
-    def plot(self, train_id, ax=None, fig=None):
+    def plot(self, train_id, ax=None, fig=None, file_path=None):
         self.compute()
         ds = self.dataset.sel(trainId=train_id)
         data = ds.image
@@ -602,7 +641,8 @@ class _StreakCamera(SaveFriend):
             fig, ax = plt.subplots(figsize=(9, 5))
 
         tid_str = f"{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}"
-        ax.set_title(f"{self.format(compact=True)}, {tid_str}")
+        sample_str = f"sample: {sample_name(self.run, train_id)}"
+        ax.set_title(f"{self.format(compact=True)}, {tid_str}, {sample_str}")
         ax.set_xlabel(f'Distance [{space_axis.attrs.get("units", "?")}]')
         ax.set_ylabel(f'Time [{time_axis.attrs.get("units", "?")}]')
 
@@ -636,6 +676,9 @@ class _StreakCamera(SaveFriend):
 
         fig.colorbar(im, ax=ax)
         fig.tight_layout()
+
+        if file_path is not None:
+            fig.savefig(file_path, bbox_inches="tight", format="png")
 
         return ax
 
@@ -705,12 +748,31 @@ class _StreakCamera(SaveFriend):
         fig.savefig(fpath, bbox_inches="tight", format="png")
         fpath.chmod(0o777)
 
-    def to_tiff(
-        self,
-        output=".",
-        filename="p{proposal:06}_r{run:04}_{name}.tiff",
-    ):
-        ...
+    def save(self, output):
+        output = Path(output)
+        self.compute()
+
+        # save info at text
+        with open(output / f"{self.name}_p{self.proposal_number:06}_r{self.run_number:04}_INFO.txt", "w") as f:
+            f.write(self.format())
+            f.write("\n\n")
+            f.write(self.dipole.format())
+            f.write("\n")
+
+        for train_id in self.coords.trainId:
+            _tid = train_id.data.tolist()
+            _type = train_id.type.data.tolist()
+
+            # save raw frame as tiff
+            raw = self.detector[by_id[[_tid]]].ndarray().squeeze()
+            save_tiff(raw,output / f"{self.name}_RAW_{_tid}_{_type}.tiff")
+            # save dewarped frame as tiff
+            dewarped = self.image().sel(trainId=_tid).data
+            save_tiff(dewarped, output / f"{self.name}_DEWARPED_{_tid}_{_type}.tiff")
+            # save plot
+            self.plot(_tid, file_path=output / f"{self.name}_{_tid}_{_type}.png")
+            # save hdf5
+            self.to_h5(output)
 
 
 class _VISAR(_StreakCamera):
