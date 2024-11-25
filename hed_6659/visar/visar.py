@@ -21,7 +21,8 @@ from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
 from scipy.stats import median_abs_deviation
 
-from .utils import ppu_trigger, dipole_trigger, dipole_ppu_open, save_tiff, sample_name
+from .shock import find_shocks, show_roi
+from ..utils import ppu_trigger, dipole_trigger, dipole_ppu_open, save_tiff, sample_name
 
 __all__ = ["VISAR"]
 
@@ -76,6 +77,8 @@ def format_train_ids(data):
     This function takes a 1D array, it then formats the output to show the first
     element and formats the subsequent elements to only show the changing digits
     """
+    if isinstance(data, np.ndarray) and data.shape == ():
+        return f'[{data.tolist()}]'
     if len(data) == 0:
         return "[]"
 
@@ -192,13 +195,13 @@ class SaveFriend:
     (extra_data.DataCollection) run object.
     """
 
-    def _quantities(self):
+    def _quantities(self, ignore=[]):
         """Return a list of all cache-able methods"""
         methods = getmembers(self, predicate=ismethod)
         return [
             (name, method)
             for name, method in methods
-            if getattr(method, "_is_cached", False)
+            if getattr(method, "_is_cached", False) and name not in ignore
         ]
 
     @cached_property
@@ -235,11 +238,11 @@ class DIPOLE(SaveFriend):
     def format(self, compact=False):
         """Format information about the VISAR component."""
         run_str = f'p{self.proposal_number:06}, r{self.run_number:04}'
+        info_str = f"{self.name} properties for {run_str}:\n"
 
         if compact:
             return f"{self.name}, {run_str}"
 
-        info_str = f"{self.name} properties for {run_str}:\n"
         data = []
         for name, quantity in self._quantities():
             if name.startswith("_"):
@@ -490,8 +493,14 @@ class _StreakCamera(SaveFriend):
                 continue
 
             value = quantity()
+            # only display information for shots, skip reference
+            value = value[value.type == 'shot']
             name = value.name
             units = value.attrs.get("units", "")
+
+            if name == 'Shocks' and value.size > 0:
+                # display the breakout times only
+                value = value[:, 0]
 
             # only show a single value if it's not changing
             if len(np.unique(value)) == 1:
@@ -507,9 +516,7 @@ class _StreakCamera(SaveFriend):
             [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
 
-        train_ids = lambda _type: self.coords.where(
-            self.coords.type == _type, drop=True
-        ).trainId.data
+        train_ids = lambda _type: self.coords.sel(type=_type).trainId.data
         info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
         info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
         info_str += f"\n\n Sample ID: {', '.join(sample_name(self.run))}"
@@ -590,12 +597,14 @@ class _StreakCamera(SaveFriend):
             insort(train_ids, ref_ids[0])
             types.insert(train_ids.index(ref_ids[0]), "reference")
 
-        return xr.Dataset(
+        coords = xr.Dataset(
             coords={
                 "trainId": np.array(train_ids, dtype=np.uint64),
                 "type": ("trainId", types),
             }
         )
+        coords = coords.set_xindex("type")
+        return coords
 
     @_cache(name="image")
     def image(self):
@@ -650,16 +659,24 @@ class _StreakCamera(SaveFriend):
 
         tid_str = f"{type_} ({frame_index + 1}/{frames.trainId.size}), tid:{train_id}"
         sample_str = f"sample: {sample_name(self.run, train_id)}"
-        ax.set_title(f"{self.format(compact=True)}, {tid_str}, {sample_str}")
-        ax.set_xlabel(f'Distance [{space_axis.attrs.get("units", "?")}]')
-        ax.set_ylabel(f'Time [{time_axis.attrs.get("units", "?")}]')
+        ax.set_title(f"{self.format(compact=True)}, {tid_str}\n{sample_str}")
+        ax.set_ylabel(f'Distance [{space_axis.attrs.get("units", "?")}]')
+        ax.set_xlabel(f'Time [{time_axis.attrs.get("units", "?")}]')
 
         extent = [time_axis[0], time_axis[-1], space_axis[0], space_axis[-1]]
         im = ax.imshow(
             data, extent=extent, cmap="jet", vmin=0, vmax=data.mean() + 3 * data.std()
         )
+
+        ys, xs = np.where(data > 0)
+        ax.set_xlim(xmin=time_axis[xs.min()], xmax=time_axis[xs.max()])
+        ax.set_ylim(ymin=-space_axis[ys.max()], ymax=-space_axis[ys.min()])
+        ax.set_aspect("auto")
+
+        # Vertical line indicating the FEL laser
+        fel_delay = ds["Difference X-drive"].data.tolist()
         ax.vlines(
-            ds["Difference X-drive"],  # fel_delay
+            fel_delay,
             ymin=space_axis[0],
             ymax=space_axis[-1],
             linestyles="-",
@@ -668,21 +685,70 @@ class _StreakCamera(SaveFriend):
             alpha=1,
         )
 
-        ys, xs = np.where(data > 0)
-        ax.set_xlim(xmin=time_axis[xs.min()], xmax=time_axis[xs.max()])
-        ax.set_ylim(ymin=-space_axis[ys.max()], ymax=-space_axis[ys.min()])
-        ax.set_aspect("auto")
+        # Vertical line indicating the shock breakout
+        try:
+            shocks = self.shocks().sel(trainId=train_id)
+        except AttributeError:
+            shocks = np.array([])
+
+        if shocks.size > 0:
+            ax.vlines(
+                shocks[0],
+                ymin=space_axis[0],
+                ymax=space_axis[-1],
+                linestyles="-.",
+                lw=2,
+                color="yellow",
+                alpha=1,
+            )
+
+        # add second xaxis on top to label fel and shock breakouts
+        ax2 = ax.twiny()
+        ax2.xaxis.set_ticks_position("top")
+
+        ticks = ['FEL']
+        if shocks.size > 0:
+            ticks += ['Breakout']
+            ticks += [f"Shock {i}" for i, _ in enumerate(shocks[1:], start=2)]
+        ax2.set_xticks([fel_delay, *shocks])
+        ax2.set_xticklabels(ticks)
+        ax2.set_xlim(ax.get_xlim())
+        ax2.set_ylim(ax.get_ylim())
+        ax2.set_aspect("auto")
+
+        # add delta t fel-breakout information if shock is found
+        if shocks.size > 0:
+            from matplotlib.offsetbox import AnchoredOffsetbox, TextArea
+            box1 = TextArea(
+                f"$\delta t$ fel-breakout: {round(shocks.data[0] - fel_delay, 2)}ns",
+                textprops=dict(color="k")
+            )
+            # box = HPacker(children=[box1], align="center", pad=0, sep=5)
+            anchored_box = AnchoredOffsetbox(
+                loc='lower right',
+                child=box1, pad=0.2,
+                frameon=True,
+                bbox_to_anchor=(1., 1.02),
+                bbox_transform=ax.transAxes,
+                borderpad=0.,
+            )
+            ax2.add_artist(anchored_box)
 
         from matplotlib.ticker import MultipleLocator
 
+        if ys.min() < -400 or ys.max() > 400:
+            major, minor = 400, 100
+        else:
+            major, minor = 200, 50
+
         ax.xaxis.set_major_locator(MultipleLocator(5))
         ax.xaxis.set_minor_locator(MultipleLocator(1))
-        ax.yaxis.set_major_locator(MultipleLocator(400))
-        ax.yaxis.set_minor_locator(MultipleLocator(100))
+        ax.yaxis.set_major_locator(MultipleLocator(major))
+        ax.yaxis.set_minor_locator(MultipleLocator(minor))
         ax.grid(which="major", color="k", linestyle="--", linewidth=2, alpha=0.5)
         ax.grid(which="minor", color="k", linestyle=":", linewidth=1, alpha=1)
 
-        fig.colorbar(im, ax=ax)
+        fig.colorbar(im, ax=ax2)
         fig.tight_layout()
 
         if file_path is not None:
@@ -803,6 +869,70 @@ class _VISAR(_StreakCamera):
     @_cache(name="Temporal delay")
     def temporal_delay(self):
         return self._data(self.arm["temporalDelay"])
+
+    @_cache(name="Shocks")
+    def shocks(self, roi_ref=np.s_[1200:2400, 680:1080], roi_phase=np.s_[1200:1800, 680:3560]):
+        # TODO handle all parameters
+        # TODO parallelize?
+        # TODO it seems to be more accurate when working on cropped image, need to test
+        train_ids = self.coords.sel(type="shot").trainId.values.tolist()
+        if isinstance(train_ids, int):
+            train_ids = [train_ids]
+
+        shocks = [self._shocks(tid, roi_ref, roi_phase) for tid in train_ids]
+
+        # Determine the maximum length
+        max_length = max(len(s) for s in shocks)
+        shocks = [s + [np.nan] * (max_length - len(s)) for s in shocks]
+        return xr.DataArray(
+            shocks,
+            dims=['trainId', 'Shock time'],
+            coords={'trainId': train_ids},
+            attrs={
+                'units': 'ns',
+                'roi_ref': roi_ref,
+                'roi_phase': roi_phase,
+            }
+        )
+
+    def _shocks(self, train_id, roi_ref, roi_phase):
+        ref = self.image().where(self.image().type == 'reference', drop=True)
+        data = self.image().sel(trainId=train_id)
+        time = self._time_axis().sel(trainId=train_id)
+
+        if ref.size ==0 or data.size == 0:
+            return []
+
+        ref = ref.data.squeeze()
+        data = data.data.squeeze()
+        time = time.data.squeeze()
+
+        # downsample image as the find_shock routine was tested on 1024x1024 images
+        # imput data is 4096x4096
+        def _re_slice(roi, ratio=1/4):
+            return tuple(
+                slice(int(slice_.start * ratio), int(slice_.stop * ratio))
+                for slice_ in roi
+            )
+
+        ref = cv2.resize(ref, (1024, 1024))
+        data = cv2.resize(data, (1024, 1024))
+        time = np.linspace(time[0], time[-1], 1024)
+        roi_ref = _re_slice(roi_ref)
+        roi_phase = _re_slice(roi_phase)
+
+        show_roi(ref, roi_ref, 'ref')
+        show_roi(data, roi_phase, 'phase')
+
+        try:
+            return find_shocks(
+                ref, data, time,
+                roi_ref=roi_ref,
+                roi_phase=roi_phase,
+            ).tolist()
+        except Exception as ex:
+            print(ex)
+            return []
 
 
 class _KEPLER(_VISAR):
