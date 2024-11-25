@@ -2,8 +2,8 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["hed_6659"]
+#[tool.setuptools]
+#packages = ["hed_6659"]
 
 [project]
 name = "hed_6659"
