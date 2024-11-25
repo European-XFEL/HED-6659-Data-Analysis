@@ -64,9 +64,10 @@ def remap(image, source, target):
 
 
 def resize(image, row_factor=2, column_factor=2):
+    # TODO shape info inverted in new proosal?
     return cv2.resize(
         image,
-        (image.shape[1] * row_factor, image.shape[0] * column_factor),
+        (image.shape[0] * row_factor, image.shape[1] * column_factor),
         interpolation=cv2.INTER_CUBIC,
     )
 
@@ -618,6 +619,7 @@ class _StreakCamera(SaveFriend):
         # need to upscale it full size to use the time calibration
         data = np.array([resize(frame) for frame in data])
         data = np.rot90(data, 1, axes=(1, 2))
+        data = np.array([np.flipud(frame) for frame in data])
         return xr.DataArray(data, dims=["trainId", "dim_0", "dim_1"])
 
     @_cache(name="Time axis")
@@ -895,7 +897,7 @@ class _VISAR(_StreakCamera):
             }
         )
 
-    def _shocks(self, train_id, roi_ref, roi_phase):
+    def _shocks(self, train_id, roi_ref, roi_phase, debug=False):
         ref = self.image().where(self.image().type == 'reference', drop=True)
         data = self.image().sel(trainId=train_id)
         time = self._time_axis().sel(trainId=train_id)
@@ -922,8 +924,9 @@ class _VISAR(_StreakCamera):
         roi_phase = _re_slice(roi_phase)
 
         # Debug
-        # show_roi(ref, roi_ref, 'ref')
-        # show_roi(data, roi_phase, 'phase')
+        if debug:
+            show_roi(ref, roi_ref, 'ref')
+            show_roi(data, roi_phase, 'phase')
 
         try:
             return find_shocks(
