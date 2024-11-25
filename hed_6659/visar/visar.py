@@ -890,8 +890,8 @@ class _VISAR(_StreakCamera):
             coords={'trainId': train_ids},
             attrs={
                 'units': 'ns',
-                'roi_ref': roi_ref,
-                'roi_phase': roi_phase,
+                'roi_ref': str(roi_ref),
+                'roi_phase': str(roi_phase),
             }
         )
 
@@ -921,8 +921,9 @@ class _VISAR(_StreakCamera):
         roi_ref = _re_slice(roi_ref)
         roi_phase = _re_slice(roi_phase)
 
-        show_roi(ref, roi_ref, 'ref')
-        show_roi(data, roi_phase, 'phase')
+        # Debug
+        # show_roi(ref, roi_ref, 'ref')
+        # show_roi(data, roi_phase, 'phase')
 
         try:
             return find_shocks(

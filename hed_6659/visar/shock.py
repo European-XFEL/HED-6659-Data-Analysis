@@ -1,9 +1,12 @@
 import cmath
+import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.stats import chi2
+
+log = logging.getLogger(__name__)
 
 
 def find_shocks(
@@ -78,7 +81,7 @@ def find_shocks(
     shocklist = np.append(phase_shocklist, amplitude_shocklist)
 
     if len(shocklist) == 0:
-        print('No shocks found')
+        log.info('No shocks found')
         return np.array([])
 
     #Clean up list
@@ -121,7 +124,7 @@ def analyze_roi(phase, carrier_lamda):
     n_cols = phase.shape[1]
 
     if n_rows == 0: #Failed to find carrier wavelength
-        print('Failed to find fringe carrier wavelength. Check fringe contrast and/or reference ROI')
+        log.warning('Failed to find fringe carrier wavelength. Check fringe contrast and/or reference ROI')
         return
 
     # Find carrier location in FFT array
