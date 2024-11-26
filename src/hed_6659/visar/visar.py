@@ -584,7 +584,11 @@ class _StreakCamera(SaveFriend):
             # most streak cameras have a delay between the trigger and the frame
             # so we look for the trainId of the the available frame if it does
             # not falls on the shot_id 
-            shot_ids = find_closest(shot_ids, tids.tolist())
+            try:
+                shot_ids = find_closest(shot_ids, tids.tolist())
+            except ValueError:
+                # no frame found in this run
+                shot_ids = []
             ref_ids = np.setdiff1d(tids, ppu_trigger(self.run) + dipole_trigger(self.run))
         else:
             # else we try to get the train IDs from correlation between detector
