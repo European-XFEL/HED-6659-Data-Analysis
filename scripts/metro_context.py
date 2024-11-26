@@ -128,9 +128,9 @@ class StreakCamera(ViewGroup):
     flipud: Parameter = False
     downsample: Parameter = 4
 
-    control: Parameter = 'HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2'
-    trigger: Parameter = 'HED_EXP_VISAR/TSYS/ARM_2_TRIG'
-    detector: Parameter = 'HED_SYDOR_TEST/CAM/KEPLER_2:output'
+    # control: Parameter = 'HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2'
+    # trigger: Parameter = 'HED_EXP_VISAR/TSYS/ARM_2_TRIG'
+    # detector: Parameter = 'HED_SYDOR_TEST/CAM/KEPLER_2:output'
 
     def __init__(self, *args, prefix="KEPLER1", trigger_offset=0, a=1, **kwargs):
         super().__init__(*args, prefix=f'{prefix}/', **kwargs)
@@ -392,36 +392,36 @@ else:
 
 
 kepler1 = VISAR(
-    arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_1',
+    prefix="KEPLER1",
     control='HED_SYDOR_TEST/CTRL/CONTROL_UNIT_1',
+    arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_1',
     trigger='HED_EXP_VISAR/TSYS/ARM_1_TRIG',
     detector=f'HED_SYDOR_TEST/CAM/KEPLER_1:{channel}[data.image.pixels]{source}',
-    prefix="KEPLER1",
     trigger_offset=0,
 )
 
 kepler2 = VISAR(
-    arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2',
+    prefix="KEPLER2",
     control='HED_SYDOR_TEST/CTRL/CONTROL_UNIT_2',
+    arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_2',
     trigger='HED_EXP_VISAR/TSYS/ARM_2_TRIG',
     detector=f'HED_SYDOR_TEST/CAM/KEPLER_2:{channel}[data.image.pixels]{source}',
-    prefix="KEPLER2",
     trigger_offset=3,
 )
 
 visar1w = VISAR_1w(
+    prefix='VISAR_1w',
+    control='HED_EXP_VISAR/EXP/ARM_3_STREAK',
     arm='COMP_HED_VISAR/MDL/VISAR_SENSITIVITY_ARM_3',
     trigger='HED_EXP_VISAR/TSYS/ARM_3_TRIG',
     detector=f'HED_EXP_VISAR/EXP/ARM_3_STREAK:{channel}[data.image.pixels]{source}',
-    ctrl='HED_EXP_VISAR/EXP/ARM_3_STREAK',
-    prefix='VISAR_1w',
     trigger_offset=1,
 )
 
 SOP = StreakCamera(
+    prefix="SOP",
+    control="HED_EXP_VISAR/EXP/SOP_STREAK",
     trigger="HED_EXP_VISAR/TSYS/SOP_TRIG",
     detector=f"HED_EXP_VISAR/EXP/SOP_STREAK:{channel}[data.image.pixels]{source}",
-    ctrl="HED_EXP_VISAR/EXP/SOP_STREAK",
-    prefix="SOP",
     trigger_offset=1,
 )

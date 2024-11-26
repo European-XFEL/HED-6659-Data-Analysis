@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 PROPOSAL_NUMBER = 6746
 
 ROOT_PATH = Path('/gpfs/exfel/exp/HED/202405/p006659/usr/Software/tmichela')
-VISAR_CONFIG = ROOT_PATH / 'visar_calibration_values_p6746.toml'
+VISAR_CONFIG = ROOT_PATH / 'calibration_6659.toml'
 PONI = ROOT_PATH / 'fake_instrument.poni'  #pyFAI.load('')
 HEXRD_SOURCE = ROOT_PATH / 'calibration.hexrd'
 HEXRD_TARGET = ROOT_PATH / 'fake_instrument.hexrd'

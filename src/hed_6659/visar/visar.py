@@ -64,7 +64,6 @@ def remap(image, source, target):
 
 
 def resize(image, row_factor=2, column_factor=2):
-    # TODO shape info inverted in new proosal?
     return cv2.resize(
         image,
         (image.shape[0] * row_factor, image.shape[1] * column_factor),
@@ -359,8 +358,8 @@ class CalibrationData:
 
         if file_path is not None:
             config = toml.load(file_path)
-            self.config = config[self.visar.name]
-            self.config.update(config["global"])
+            self.config = config['global']
+            self.config.update(config[self.visar.name])
         else:
             self.config = {}
 
@@ -459,7 +458,14 @@ class _StreakCamera(SaveFriend):
         self.dipole = DIPOLE(self, sel)
         self.cal = CalibrationData(self, config_file)
 
-        self.dataset = xr.Dataset(coords=self.coords)
+        self.dataset = xr.Dataset(
+            coords=self.coords,
+            attrs={
+                "calibration": self.cal.config,
+                "run_number": self.run_number,
+                "proposal_number": self.proposal_number,
+            },
+        )
 
     def __repr__(self):
         return f"<{type(self).__name__} {self.name}>"
@@ -529,7 +535,7 @@ class _StreakCamera(SaveFriend):
             self.cal.fel_zero
             - self.cal.dipole_zero
             - self.dipole.delay()
-            - self.sweep_delay()
+            # - self.sweep_delay()
         )
         return xr.DataArray(fel_delay, dims=["trainId"], attrs={"units": "ns"})
 
@@ -578,7 +584,11 @@ class _StreakCamera(SaveFriend):
             # most streak cameras have a delay between the trigger and the frame
             # so we look for the trainId of the the available frame if it does
             # not falls on the shot_id 
-            shot_ids = find_closest(shot_ids, tids.tolist())
+            try:
+                shot_ids = find_closest(shot_ids, tids.tolist())
+            except ValueError:
+                # no frame found in this run
+                shot_ids = []
             ref_ids = np.setdiff1d(tids, ppu_trigger(self.run) + dipole_trigger(self.run))
         else:
             # else we try to get the train IDs from correlation between detector
@@ -708,9 +718,9 @@ class _StreakCamera(SaveFriend):
         ax2 = ax.twiny()
         ax2.xaxis.set_ticks_position("top")
 
-        ticks = ['FEL']
+        ticks = [f'FEL: {fel_delay}ns']
         if shocks.size > 0:
-            ticks += ['Breakout']
+            ticks += [f'Breakout: {shocks[0]}ns\n']
             ticks += [f"Shock {i}" for i, _ in enumerate(shocks[1:], start=2)]
         ax2.set_xticks([fel_delay, *shocks])
         ax2.set_xticklabels(ticks)
