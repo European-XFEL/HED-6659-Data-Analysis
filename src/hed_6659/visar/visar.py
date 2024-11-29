@@ -4,6 +4,7 @@ Code to correct image deformation for the KEPLER (and others) streak cameras
 used for the VISAR device at the HED instrument at European XFEL.
 """
 
+import json
 import logging
 from bisect import insort, bisect_left
 from functools import cache, cached_property, wraps
@@ -19,6 +20,7 @@ import xarray as xr
 from extra_data import KeyData, by_id
 from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
+from scipy.ndimage import zoom
 from scipy.stats import median_abs_deviation
 
 from .shock import find_shocks, show_roi
@@ -461,7 +463,7 @@ class _StreakCamera(SaveFriend):
         self.dataset = xr.Dataset(
             coords=self.coords,
             attrs={
-                "calibration": self.cal.config,
+                "calibration": json.dumps(self.cal.config),
                 "run_number": self.run_number,
                 "proposal_number": self.proposal_number,
             },
@@ -523,9 +525,11 @@ class _StreakCamera(SaveFriend):
             [f"  {name:<{span}}{value} {units}" for name, value, units in sorted(data)]
         )
 
-        train_ids = lambda _type: self.coords.sel(type=_type).trainId.data
-        info_str += f'\n\n  Train ID (shots): {format_train_ids(train_ids("shot"))}'
-        info_str += f'\n  Train ID (ref.): {format_train_ids(train_ids("reference"))}'
+        def _train_ids(_type):
+            return self.coords.where(self.coords.type == _type, drop=True).trainId.data
+
+        info_str += f'\n\n  Train ID (shots): {format_train_ids(_train_ids("shot"))}'
+        info_str += f'\n  Train ID (ref.): {format_train_ids(_train_ids("reference"))}'
         info_str += f"\n\n Sample ID: {', '.join(sample_name(self.run))}"
         return info_str
 
@@ -614,7 +618,6 @@ class _StreakCamera(SaveFriend):
                 "type": ("trainId", types),
             }
         )
-        coords = coords.set_xindex("type")
         return coords
 
     @_cache(name="image")
@@ -718,9 +721,10 @@ class _StreakCamera(SaveFriend):
         ax2 = ax.twiny()
         ax2.xaxis.set_ticks_position("top")
 
-        ticks = [f'FEL: {fel_delay}ns']
+        ticks = [f'FEL: {round(fel_delay, 3)}ns']
         if shocks.size > 0:
-            ticks += [f'Breakout: {shocks[0]}ns\n']
+            value = round(float(shocks[0].data), 3)
+            ticks += [f'Breakout: {value}ns\n']
             ticks += [f"Shock {i}" for i, _ in enumerate(shocks[1:], start=2)]
         ax2.set_xticks([fel_delay, *shocks])
         ax2.set_xticklabels(ticks)
@@ -731,8 +735,12 @@ class _StreakCamera(SaveFriend):
         # add delta t fel-breakout information if shock is found
         if shocks.size > 0:
             from matplotlib.offsetbox import AnchoredOffsetbox, TextArea
+            try:
+                delta = round(shocks.data[0] - fel_delay, 2)
+            except ValueError:
+                delta = 'nan '
             box1 = TextArea(
-                f"$\delta t$ fel-breakout: {round(shocks.data[0] - fel_delay, 2)}ns",
+                f"$\delta t$ fel-breakout: {delta}ns",
                 textprops=dict(color="k")
             )
             # box = HPacker(children=[box1], align="center", pad=0, sep=5)
@@ -760,7 +768,10 @@ class _StreakCamera(SaveFriend):
         ax.grid(which="major", color="k", linestyle="--", linewidth=2, alpha=0.5)
         ax.grid(which="minor", color="k", linestyle=":", linewidth=1, alpha=1)
 
-        fig.colorbar(im, ax=ax2)
+        try:
+            fig.colorbar(im, ax=ax2)
+        except Exception:
+            pass
         fig.tight_layout()
 
         if file_path is not None:
@@ -849,12 +860,19 @@ class _StreakCamera(SaveFriend):
             _tid = train_id.data.tolist()
             _type = train_id.type.data.tolist()
 
+            def _save(data, path):
+                data = data.squeeze()
+                data = np.nan_to_num(data)
+                if self.name.startswith('KEPLER'):
+                    data = zoom(data, 1/4)
+                save_tiff(data, path)
+
             # save raw frame as tiff
             raw = self.detector[by_id[[_tid]]].ndarray().squeeze()
-            save_tiff(raw,output / f"{self.name}_RAW_{_tid}_{_type}.tiff")
+            _save(raw, output / f"{self.name}_RAW_{_tid}_{_type}.tiff")
             # save dewarped frame as tiff
-            dewarped = self.image().sel(trainId=_tid).data
-            save_tiff(dewarped, output / f"{self.name}_DEWARPED_{_tid}_{_type}.tiff")
+            dewarped = self.image().sel(trainId=_tid).data.squeeze()
+            _save(dewarped, output / f"{self.name}_DEWARPED_{_tid}_{_type}.tiff")
             # save plot
             self.plot(_tid, file_path=output / f"{self.name}_{_tid}_{_type}.png")
             # save hdf5
@@ -887,11 +905,18 @@ class _VISAR(_StreakCamera):
         # TODO handle all parameters
         # TODO parallelize?
         # TODO it seems to be more accurate when working on cropped image, need to test
-        train_ids = self.coords.sel(type="shot").trainId.values.tolist()
+        train_ids = self.coords.where(self.coords.type == "shot", drop=True).trainId.values.tolist()
+
         if isinstance(train_ids, int):
             train_ids = [train_ids]
 
         shocks = [self._shocks(tid, roi_ref, roi_phase) for tid in train_ids]
+        if len(shocks) == 0:
+            return xr.DataArray(
+                np.full((0, 0), np.nan),
+                dims=['trainId', 'Shock time'],
+                coords={'trainId': []}
+            )
 
         # Determine the maximum length
         max_length = max(len(s) for s in shocks)

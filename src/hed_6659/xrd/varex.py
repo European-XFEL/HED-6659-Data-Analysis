@@ -7,7 +7,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyFAI
 from extra_data import by_id, open_run
+from hexrd.instrument import HEDMInstrument
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from pyFAI.azimuthalIntegrator import AzimuthalIntegrator
 
 from .projection import Projection as ImageProjection
 from ..utils import ppu_trigger, dipole_ppu_open, dipole_trigger, fel_trigger, sample_name, save_tiff
@@ -57,21 +59,27 @@ def trim_array(data, value=0., ratio=1):
 class XRDProcessor:
     proposal_number: int
     run_number: int
-    # TODO take Projection and AI object as imput so the don't have to be reinstantiated for each run
-    source: str
-    target: str
-    poni: str
     output: Path
+    # TODO take Projection and AI object as imput so the don't have to be reinstantiated for each run
+    poni: str | AzimuthalIntegrator
+    source: str | ImageProjection
+    target: str | None = None
 
     def __post_init__(self):
         self.run = open_run(self.proposal_number, self.run_number)
         self.varex1 = VAREX(self.run, 'VAREX1')
         self.varex2 = VAREX(self.run, 'VAREX2')
-        self.p = ImageProjection(
-            instr_path=self.source,
-            projection_instr_path=self.target
-        )
-        self.ai = pyFAI.load(self.poni)
+
+        if isinstance(self.source, str):
+            self.p = ImageProjection(
+                instr_path=self.source,
+                projection_instr_path=self.target
+            )
+        else:
+            self.p = self.source
+
+        if isinstance(self.poni, str):
+            self.poni = pyFAI.load(self.poni)
         self.output = Path(self.output)
 
     def _info(self, train_id, kind):
@@ -103,7 +111,7 @@ class XRDProcessor:
             return None
 
     def integrate1d(self, image, npt=1500):
-        return self.ai.integrate1d(
+        return self.poni.integrate1d(
             image, npt,
             unit="q_A^-1",
             error_model="poisson",
@@ -112,7 +120,7 @@ class XRDProcessor:
         )
 
     def integrate2d(self, image, npt_rad=1500, npt_azim=2400):
-        return self.ai.integrate2d(
+        return self.poni.integrate2d(
             image, npt_rad,
             npt_azim=npt_azim,
             unit="q_A^-1",
@@ -169,7 +177,7 @@ class XRDProcessor:
         save_tiff(self.varex2.frame(train_id), self.output / f'VAREX_2_tid_{train_id}_{kind}.tiff')
 
         # save poni
-        self.ai.write(self.output / 'VAREX.poni')
+        self.poni.write(self.output / 'VAREX.poni')
 
         if image is None:
             return  # projection failed, we return early
