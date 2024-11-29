@@ -231,8 +231,21 @@ class SaveFriend:
 class DIPOLE(SaveFriend):
     def __init__(self, visar, run, name="DiPOLE"):
         self.name = name
-        self.run = run
-        self.dataset = xr.Dataset(coords=visar.coords)
+
+        reference = int(visar.coords.where(visar.coords.type == 'reference', drop=True).trainId.data.tolist()[0])
+        train_ids = dipole_trigger(run).tolist()
+        if isinstance(train_ids, int):
+            train_ids = [train_ids]
+        insort(train_ids, reference)
+        types = ['shot'] * len(train_ids)
+        types[train_ids.index(reference)] = 'reference'
+
+        self.run = run.select_trains(by_id[train_ids])
+        self.dataset = xr.Dataset(coords={
+                "trainId": np.array(train_ids, dtype=np.uint64),
+                "type": ("trainId", types),})
+        # self.run = run
+        # self.dataset = xr.Dataset(coords=visar.coords)
 
     def info(self):
         print(self.format())
@@ -313,8 +326,8 @@ class DIPOLE(SaveFriend):
         scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
         traces = scope.xarray()
 
-        energy = self.energy()
-        energy = energy[energy.type == "shot"].data
+        energy = self.energy().data
+        # energy = energy[energy.type == "shot"].data
 
         noise_std = median_abs_deviation(traces, axis=1, scale="normal")
         threshold = traces.median(axis=1) + threshold_sigma * noise_std
@@ -457,7 +470,7 @@ class _StreakCamera(SaveFriend):
         self.detector = sel[self.visar["detector"]]
         self.ctrl = sel[self.visar["ctrl"]]
 
-        self.dipole = DIPOLE(self, sel)
+        self.dipole = DIPOLE(self, run)
         self.cal = CalibrationData(self, config_file)
 
         self.dataset = xr.Dataset(
@@ -905,21 +918,22 @@ class _VISAR(_StreakCamera):
         return self._data(self.arm["temporalDelay"])
 
     @_cache(name="Shocks")
-    def shocks(self, roi_ref=np.s_[1200:2400, 680:1080], roi_phase=np.s_[1200:1800, 680:3560]):
+    def shocks(self):
         # TODO handle all parameters
         # TODO parallelize?
         # TODO it seems to be more accurate when working on cropped image, need to test
-        train_ids = self.coords.where(self.coords.type == "shot", drop=True).trainId.values.tolist()
+        # train_ids = self.coords.where(self.coords.type == "shot", drop=True).trainId.values.tolist()
+        train_ids = self.train_ids.value
 
         if isinstance(train_ids, int):
             train_ids = [train_ids]
 
-        shocks = [self._shocks(tid, roi_ref, roi_phase) for tid in train_ids]
+        shocks = [self._shocks(tid) for tid in train_ids]
         if len(shocks) == 0:
             return xr.DataArray(
-                np.full((0, 0), np.nan),
+                np.full((len(train_ids), 0), np.nan),
                 dims=['trainId', 'Shock time'],
-                coords={'trainId': []}
+                coords={'trainId': train_ids}
             )
 
         # Determine the maximum length
@@ -931,12 +945,12 @@ class _VISAR(_StreakCamera):
             coords={'trainId': train_ids},
             attrs={
                 'units': 'ns',
-                'roi_ref': str(roi_ref),
-                'roi_phase': str(roi_phase),
+                'roi_ref': self.cal['shock']['roi_ref'],
+                'roi_phase': self.cal['shock']['roi_phase'],
             }
         )
 
-    def _shocks(self, train_id, roi_ref, roi_phase, debug=False):
+    def _shocks(self, train_id, debug=False):
         ref = self.image().where(self.image().type == 'reference', drop=True)
         data = self.image().sel(trainId=train_id)
         time = self._time_axis().sel(trainId=train_id)
@@ -948,31 +962,26 @@ class _VISAR(_StreakCamera):
         data = data.data.squeeze()
         time = time.data.squeeze()
 
-        # downsample image as the find_shock routine was tested on 1024x1024 images
-        # imput data is 4096x4096
-        def _re_slice(roi, ratio=1/4):
-            return tuple(
-                slice(int(slice_.start * ratio), int(slice_.stop * ratio))
-                for slice_ in roi
-            )
-
-        ref = cv2.resize(ref, (1024, 1024))
-        data = cv2.resize(data, (1024, 1024))
+        ref = cv2.resize(ref, (1024, 1024))[::-1]
+        data = cv2.resize(data, (1024, 1024))[::-1]
         time = np.linspace(time[0], time[-1], 1024)
-        roi_ref = _re_slice(roi_ref)
-        roi_phase = _re_slice(roi_phase)
 
-        # Debug
-        if debug:
-            show_roi(ref, roi_ref, 'ref')
-            show_roi(data, roi_phase, 'phase')
+        # # Debug
+        # if debug:
+        #     show_roi(ref, roi_ref, 'ref')
+        #     show_roi(data, roi_phase, 'phase')
 
+        conf = self.cal['shock']
         try:
-            return find_shocks(
-                ref, data, time,
-                roi_ref=roi_ref,
-                roi_phase=roi_phase,
-            ).tolist()
+            shocks = find_shocks(
+                ref, conf['roi_ref'],
+                data, conf['roi_phase'],
+                time,
+                debug=debug
+            )
+            if shocks is None:
+                return []
+            return shocks.tolist()
         except Exception as ex:
             print(ex)
             return []
