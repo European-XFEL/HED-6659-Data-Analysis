@@ -129,7 +129,7 @@ def largest_group(arr):
     return arr[start : start + length]
 
 
-def find_closest(shot_ids, frames):
+def find_closest(shot_ids, frames, offset=0):
     """
     For each number in `shot_ids`, find the matching number in `frames`.
     If a matching number is missing, find the closest larger number.
@@ -145,7 +145,7 @@ def find_closest(shot_ids, frames):
 
     for num in shot_ids:
         # Find the position to insert num in the sorted frames list
-        pos = bisect_left(frames, num)
+        pos = bisect_left(frames, num) + offset
         if pos < len(frames):  # If within bounds
             results.append(frames[pos])  # Add the found number or the closest larger number
         else:
@@ -589,7 +589,11 @@ class _StreakCamera(SaveFriend):
             # so we look for the trainId of the the available frame if it does
             # not falls on the shot_id 
             try:
-                shot_ids = find_closest(shot_ids, tids.tolist())
+                if self.name == 'VISAR_1w' and self.run_number > 346:
+                    offset = 1
+                else:
+                    offset = 0
+                shot_ids = find_closest(shot_ids, tids.tolist(), offset=offset)
             except ValueError:
                 # no frame found in this run
                 shot_ids = []
@@ -725,7 +729,7 @@ class _StreakCamera(SaveFriend):
         if shocks.size > 0:
             value = round(float(shocks[0].data), 3)
             ticks += [f'Breakout: {value}ns\n']
-            ticks += [f"Shock {i}" for i, _ in enumerate(shocks[1:], start=2)]
+            ticks += [f"Shock {i}\n" for i, _ in enumerate(shocks[1:], start=2)]
         ax2.set_xticks([fel_delay, *shocks])
         ax2.set_xticklabels(ticks)
         ax2.set_xlim(ax.get_xlim())
