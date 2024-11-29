@@ -121,9 +121,10 @@ def executor(proposal, run, config, output):
 
         for future in futures:
             component, name, success = future.result()
-            print(type(component), 'component', name, success)
+            print(name, success)
             try:
                 if component is not None:
+                    print(component.proposal_number, component.run_number)
                     component.save((output / 'VISAR').resolve())
             except Exception:
                 log.warning(f'{name} saving failed', exc_info=True)
