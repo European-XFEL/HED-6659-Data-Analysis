@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from extra_data import KeyData, by_id
+from extra_data import KeyData, by_id, open_run
 from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
 from scipy.ndimage import zoom
@@ -91,6 +91,27 @@ def format_train_ids(data):
         out += f" ..{str(value)[-ndigits:]}"
     out += "]"
     return out
+
+
+def find_max(data: xr.DataArray, n: int, dim='dim_0') -> np.ndarray:
+    """
+    Find indices of rows containing the n largest maximum values along the second axis.
+    Returns row indices in their original order, not sorted by value.
+
+    Args:
+        data: 2D xarray DataArray
+        n: Number of rows to return
+
+    Returns:
+        numpy array of row indices in original order
+    """
+    # Get the maximum values along axis 1
+    max_vals = data.max(dim=data.dims[1])
+
+    # Get indices of n largest values
+    top_n_idx = np.argpartition(max_vals, -n)[-n:]
+    # Sort indices by their position, not by value
+    return np.sort(top_n_idx).tolist()
 
 
 def largest_group(arr):
@@ -265,7 +286,17 @@ class DIPOLE(SaveFriend):
         #         "trainId": np.array(train_ids, dtype=np.uint64),
         #         "type": ("trainId", types),})
         self.run = run
-        self.dataset = xr.Dataset(coords=visar.coords)
+        if visar is None:
+            trigger = dipole_trigger(run)
+            coords = xr.Dataset(
+                coords={
+                    "trainId": trigger,
+                    "type": ("trainId", ["shot"] * len(trigger)),
+                }
+            )
+            self.dataset = xr.Dataset(coords=coords)
+        else:
+            self.dataset = xr.Dataset(coords=visar.coords)
 
     def info(self):
         print(self.format())
@@ -334,20 +365,28 @@ class DIPOLE(SaveFriend):
             train ID, with time coordinates adjusted according to the specified margin.
             The dimensions are ["trainId", "time [ns]"], and the data is in Watts (W).
         """
+        run = open_run(self.proposal_number, self.run_number)
         try:
-            self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST']
+            run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST']
+            run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output"]
         except SourceNameError:
             return xr.DataArray([])
 
-        sample_rate = self.run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST', 'samplerate'].as_single_value()  # Hz
+        sample_rate = run['HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST', 'samplerate'].as_single_value()  # Hz
         dt = 1e9 / sample_rate  # [ns]
         margin = int(margin / dt)  # margin in # sample
 
-        scope = self.run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
+        scope = run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", "ch1.corrected"]
         traces = scope.xarray()
 
-        energy = self.energy().data
-        # energy = energy[energy.type == "shot"].data
+        # train ID of the dipole trace is not reliable
+        shot_ids = dipole_trigger(run)
+        n_shots = shot_ids.size
+        indices = find_max(traces, n_shots)
+        traces = traces[indices]
+
+        energy = self.energy()
+        energy = energy[energy.type == "shot"].data
 
         noise_std = median_abs_deviation(traces, axis=1, scale="normal")
         threshold = traces.median(axis=1) + threshold_sigma * noise_std
@@ -380,26 +419,28 @@ class DIPOLE(SaveFriend):
 
         return xr.DataArray(
             out,
-            coords={"time [ns]": time_coord, "trainId": traces.trainId},
+            coords={"time [ns]": time_coord, "trainId": shot_ids},
             dims=["trainId", "time [ns]"],
             name="Power",
             attrs={"units": "W", "durations": durations},
         )
 
 
-class DIPOLE1(DIPOLE):
-    def __init__(self, run):
-        # shots = dipole_trigger(run, offset=-20).tolist()
-        # self.run = run.select_trains(by_id[shots])
-        # self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
+# class DIPOLE1(DIPOLE):
+#     def __init__(self, run):
+#         # shots = dipole_trigger(run, offset=-20).tolist()
+#         # self.run = run.select_trains(by_id[shots])
+#         # self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
 
-        # shots = dipole_trigger(run).tolist()
-        self.name = 'DiPOLE'
-        traces = run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", 'ch1.corrected'].xarray()
-        tmax = traces.max(dim='dim_0').argmax().data.tolist()
-        tid = traces[int(tmax)].trainId.data.tolist()
-        self.run = run.select_trains(by_id[[int(tid)]])
-        self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
+#         # shots = dipole_trigger(run).tolist()
+#         self.name = 'DiPOLE'
+#         traces = run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", 'ch1.corrected'].xarray()
+#         tmax = traces.max(dim='dim_0').argmax().data.tolist()
+#         tid = traces[int(tmax)].trainId.data.tolist()
+#         self.run_trace = run.select_trains(by_id[[int(tid)]])
+
+#         self.run = run.select_trains(by_id[dipole_trigger(run).tolist()])
+#         self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
 
 
 class CalibrationData:
