@@ -215,6 +215,15 @@ class SaveFriend:
         return self.run.run_metadata().get("proposalNumber", "?")
 
     def compute(self, profile=False):
+        try:
+            if self.coords.trainId.size == 0:
+                # nothing to compute
+                return
+        except AttributeError:
+            if self.dataset.trainId.size == 0:
+                return
+
+
         for name, quantity in self._quantities():
             t0 = perf_counter()
             quantity()
@@ -223,29 +232,40 @@ class SaveFriend:
 
     def to_h5(self, path, group):
         self.compute()
-        self.dataset.to_netcdf(
-            path=path, mode="a", group=group, format="NETCDF4", engine="h5netcdf"
-        )
+        try:
+            self.dataset.to_netcdf(
+                path=path, mode="a", group=group, format="NETCDF4", engine="h5netcdf"
+            )
+        except Exception as ex:
+            print(self.proposal_number, self.run_number)
+            print(self.name)
+            print(self.dataset)
+            raise
 
 
 class DIPOLE(SaveFriend):
     def __init__(self, visar, run, name="DiPOLE"):
         self.name = name
 
-        reference = int(visar.coords.where(visar.coords.type == 'reference', drop=True).trainId.data.tolist()[0])
-        train_ids = dipole_trigger(run).tolist()
-        if isinstance(train_ids, int):
-            train_ids = [train_ids]
-        insort(train_ids, reference)
-        types = ['shot'] * len(train_ids)
-        types[train_ids.index(reference)] = 'reference'
+        # try:
+        #     reference = int(visar.coords.where(visar.coords.type == 'reference', drop=True).trainId.data.tolist()[0])
+        # except:
+        #     reference = None
+        # train_ids = dipole_trigger(run).tolist()
+        # if isinstance(train_ids, int):
+        #     train_ids = [train_ids]
+        # if reference is not None:
+        #     insort(train_ids, reference)
+        # types = ['shot'] * len(train_ids)
+        # if reference is not None:
+        #     types[train_ids.index(reference)] = 'reference'
 
-        self.run = run.select_trains(by_id[train_ids])
-        self.dataset = xr.Dataset(coords={
-                "trainId": np.array(train_ids, dtype=np.uint64),
-                "type": ("trainId", types),})
-        # self.run = run
-        # self.dataset = xr.Dataset(coords=visar.coords)
+        # self.run = run.select_trains(by_id[train_ids])
+        # self.dataset = xr.Dataset(coords={
+        #         "trainId": np.array(train_ids, dtype=np.uint64),
+        #         "type": ("trainId", types),})
+        self.run = run
+        self.dataset = xr.Dataset(coords=visar.coords)
 
     def info(self):
         print(self.format())
@@ -367,6 +387,21 @@ class DIPOLE(SaveFriend):
         )
 
 
+class DIPOLE1(DIPOLE):
+    def __init__(self, run):
+        # shots = dipole_trigger(run, offset=-20).tolist()
+        # self.run = run.select_trains(by_id[shots])
+        # self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
+
+        # shots = dipole_trigger(run).tolist()
+        self.name = 'DiPOLE'
+        traces = run["HED_PLAYGROUND/SCOPE/TEXTRONIX_TEST:output", 'ch1.corrected'].xarray()
+        tmax = traces.max(dim='dim_0').argmax().data.tolist()
+        tid = traces[int(tmax)].trainId.data.tolist()
+        self.run = run.select_trains(by_id[[int(tid)]])
+        self.dataset = xr.Dataset(coords={'trainId': self.run.train_ids})
+
+
 class CalibrationData:
     def __init__(self, visar, file_path=None):
         self.visar = visar
@@ -470,7 +505,7 @@ class _StreakCamera(SaveFriend):
         self.detector = sel[self.visar["detector"]]
         self.ctrl = sel[self.visar["ctrl"]]
 
-        self.dipole = DIPOLE(self, run)
+        self.dipole = DIPOLE(self, sel)
         self.cal = CalibrationData(self, config_file)
 
         self.dataset = xr.Dataset(
@@ -543,7 +578,7 @@ class _StreakCamera(SaveFriend):
 
         info_str += f'\n\n  Train ID (shots): {format_train_ids(_train_ids("shot"))}'
         info_str += f'\n  Train ID (ref.): {format_train_ids(_train_ids("reference"))}'
-        info_str += f"\n\n Sample ID: {', '.join(sample_name(self.run))}"
+        info_str += f"\n\n Sample ID: {', '.join(sample_name(self.run, int(tid)) for tid in _train_ids('shot'))}"
         return info_str
 
     @_cache(name="Difference X-drive")
@@ -612,15 +647,20 @@ class _StreakCamera(SaveFriend):
                 shot_ids = []
             ref_ids = np.setdiff1d(tids, ppu_trigger(self.run) + dipole_trigger(self.run))
         else:
-            # else we try to get the train IDs from correlation between detector
-            # frames and dipole open shutter
-            ppu_open = dipole_ppu_open(self.run)
+            if self.proposal_number == 6659:
+                # only rely on trigger
+                shot_ids = []
+                ref_ids = np.array([])
+            else:
+                # else we try to get the train IDs from correlation between detector
+                # frames and dipole open shutter
+                ppu_open = dipole_ppu_open(self.run)
 
-            # train ID with data and ppu open
-            shot_ids = np.intersect1d(ppu_open, tids).tolist()
+                # train ID with data and ppu open
+                shot_ids = np.intersect1d(ppu_open, tids).tolist()
 
-            # train IDs with data and ppu closed
-            ref_ids = np.setdiff1d(tids, ppu_open.data.tolist() + ppu_trigger(self.run))
+                # train IDs with data and ppu closed
+                ref_ids = np.setdiff1d(tids, ppu_open.data.tolist() + ppu_trigger(self.run))
 
         train_ids = shot_ids
         types = ["shot"] * len(train_ids)
@@ -813,7 +853,7 @@ class _StreakCamera(SaveFriend):
 
         super().to_h5(fpath, self.name)
         self.cal.to_h5(fpath, f"{self.name}/calibration")
-        self.dipole.to_h5(fpath, f"{self.name}/DiPOLE")
+        # self.dipole.to_h5(fpath, f"{self.name}/DiPOLE")
 
         fpath.chmod(0o777)
 
@@ -865,6 +905,11 @@ class _StreakCamera(SaveFriend):
     def save(self, output):
         output = Path(output)
         self.compute()
+        if self.coords.trainId.size == 0:
+            # nothing to compute
+            with open(output/ f"{self.name}_p{self.proposal_number:06}_r{self.run_number:04}_NO_SHOT.txt", "w") as f:
+                f.write("NO SHOT IN FOR THIS RUN")
+            return
 
         # save info at text
         with open(output / f"{self.name}_p{self.proposal_number:06}_r{self.run_number:04}_INFO.txt", "w") as f:

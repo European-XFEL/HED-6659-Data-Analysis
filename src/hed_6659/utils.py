@@ -75,15 +75,19 @@ def dipole_ppu_open(run: DataCollection):
 
 @cache
 def sample_name(run, train_id=None):
+    print(train_id, type(train_id))
     if "COMP_HED_IA2_DLC/MDL/DlcSampleMover" not in run.control_sources:
         return "-"
 
     if train_id is not None:
-        return (
-            run["COMP_HED_IA2_DLC/MDL/DlcSampleMover", "sampleName"][by_id[[train_id]]]
-            .ndarray()[0]
-            .decode()
-        )
+        try:
+            return (
+                run["COMP_HED_IA2_DLC/MDL/DlcSampleMover", "sampleName"][by_id[[train_id]]]
+                .ndarray()[0]
+                .decode()
+            )
+        except IndexError:
+            print('train id not found', train_id)
 
     samples = run["COMP_HED_IA2_DLC/MDL/DlcSampleMover", "sampleName"].ndarray()
     samples = set(samples)
