@@ -6,7 +6,6 @@ from hexrd.projections.polar import PolarView
 from scipy.interpolate import RegularGridInterpolator
 from hexrd.rotations import mapAngle
 
-
 class Projection:
 
     def __init__(self,
@@ -17,8 +16,10 @@ class Projection:
                  eta_min=0.,
                  eta_max=360.,
                  pixel_size=(0.025, 0.025),
-                 cache_coordinate_map=True):
+                 cache_coordinate_map=True,
+                 apply_solid_angle_correction=True):
 
+        self._apply_solid_angle_correction = apply_solid_angle_correction
         self.instr_path            = instr_path
         self.projection_instr_path = projection_instr_path
         self._tth_min               = two_theta_min
@@ -35,6 +36,14 @@ class Projection:
             ins = h5py.File(self.instr_path, 'r')
             self.instr = HEDMInstrument(instrument_config=ins)
             ins.close()
+            self.solid_angle_min = np.finfo(np.float64).max
+            if self.apply_solid_angle_correction:
+                self.solid_angles = dict.fromkeys(self.instr.detectors)
+                for det_name, panel in self.instr.detectors.items():
+                    self.solid_angles[det_name] = panel.pixel_solid_angles
+                    self.solid_angle_min = np.min((
+                        self.solid_angle_min,
+                        self.solid_angles[det_name].min()))
         else:
             self.instr = None
             msg = (f'instrument file not specified.\n'
@@ -89,7 +98,13 @@ class Projection:
         '''main routine to warp the cake image
         back to an equivalent detector image
         '''
-        pvarray = self.pv.warp_image(img_dict,
+        img_dict_c = img_dict.copy()
+        if self.apply_solid_angle_correction:
+            for det_name, im in img_dict.items():
+                img_dict_c[det_name] = self.solid_angle_min * (
+                    im / self.solid_angles[det_name])
+
+        pvarray = self.pv.warp_image(img_dict_c,
                                      pad_with_nans=True,
                                      do_interpolation=True)
         pvarray2 = pvarray.data
@@ -160,7 +175,7 @@ class Projection:
         if hasattr(self, 'pv'):
             self._eta_min = v
             self.initialize_polar_view()
-    
+
     @property
     def eta_max(self):
         return self._eta_max
@@ -196,6 +211,18 @@ class Projection:
             else:
                 raise ValueError(f'value must be True/False')
             self.initialize_polar_view()
+
+    @property
+    def apply_solid_angle_correction(self):
+        return self._apply_solid_angle_correction
+
+    @apply_solid_angle_correction.setter
+    def apply_solid_angle_correction(self, val):
+        if hasattr(self, 'pv'):
+            if isinstance(v, bool):
+                self._apply_solid_angle_correction = val
+            else:
+                raise ValueError(f'value must be True/False')
 
     @property
     def eta_grid(self):
