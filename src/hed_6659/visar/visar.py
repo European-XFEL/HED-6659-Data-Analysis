@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
+from extra.components import XrayPulses
 from extra_data import KeyData, by_id, open_run
 from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
@@ -539,6 +540,7 @@ class _StreakCamera(SaveFriend):
         self.visar = VISAR_DEVICES[name]
 
         sel = run.select_trains(self.train_ids)
+        self.xray = XrayPulses(sel)
 
         if "arm" in self.visar:
             self.arm = sel[self.visar["arm"]]
@@ -630,6 +632,10 @@ class _StreakCamera(SaveFriend):
             - self.dipole.delay()
             # - self.sweep_delay()
         )
+
+        # add fel duration if number of pulses > 1
+        multi_pulses = (self.xray.pulse_counts() > 1).index
+        fel_delay.loc[multi_pulses] += self.xray.train_durations().loc[multi_pulses] * 1e9
         return xr.DataArray(fel_delay, dims=["trainId"], attrs={"units": "ns"})
 
     @_cache(name="Sweep delay")
