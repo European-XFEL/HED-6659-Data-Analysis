@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 import toml
 import xarray as xr
-from extra.components import XrayPulses
+#from extra.components import XrayPulses
 from extra_data import KeyData, by_id, open_run
 from extra_data.exceptions import SourceNameError
 from scipy.interpolate import griddata
@@ -539,8 +539,8 @@ class _StreakCamera(SaveFriend):
         self.name = name
         self.visar = VISAR_DEVICES[name]
 
-        sel = run.select_trains(self.train_ids)
-        self.xray = XrayPulses(sel)
+        self.sel = sel = run.select_trains(self.train_ids)
+        #self.xray = XrayPulses(sel)
 
         if "arm" in self.visar:
             self.arm = sel[self.visar["arm"]]
@@ -633,9 +633,9 @@ class _StreakCamera(SaveFriend):
             # - self.sweep_delay()
         )
 
-        # add fel duration if number of pulses > 1
-        multi_pulses = (self.xray.pulse_counts() > 1).index
-        fel_delay.loc[multi_pulses] += self.xray.train_durations().loc[multi_pulses] * 1e9
+#        # add fel duration if number of pulses > 1
+#        multi_pulses = (self.xray.pulse_counts() > 1).index
+#        fel_delay.loc[multi_pulses] += self.xray.train_durations().loc[multi_pulses] * 1e9
         return xr.DataArray(fel_delay, dims=["trainId"], attrs={"units": "ns"})
 
     @_cache(name="Sweep delay")
@@ -743,10 +743,18 @@ class _StreakCamera(SaveFriend):
     def _time_axis(self):
         axis = self.cal.timepoint(np.arange(self.image().shape[-1]))
         offset = self.cal.dipole_zero + self.dipole.delay() - self.sweep_delay()
+        # offset by xray train duration
+        if "APP_DIPOLE/MDL/DIPOLE_TIMING" in self.sel.control_sources:
+            timing = self.sel["APP_DIPOLE/MDL/DIPOLE_TIMING"]
+            extra_bunches = timing["addNbBunches"].ndarray().max()
+            dt = {"4.5 MHz": 2.215385e-07, "2.25 MHz": 4.430769e-07}[timing["accRepRate"].ndarray()[-1].decode()]
+            fel_offset = extra_bunches * dt * 1e9
+        else:
+            fel_offset = 0
 
         data = (
             np.repeat(axis[None, ...], self.coords.trainId.size, axis=0)
-            - offset.data[:, None]
+            - offset.data[:, None] - fel_offset
         )
         return xr.DataArray(data, dims=["trainId", "Time"], attrs={"units": "ns"})
 

@@ -33,20 +33,20 @@ def dipole_trigger(run: DataCollection, offset: int=0) -> DataCollection:
         return np.array([])
 
     seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_DIPOLE", "sequenceStart"].ndarray()
-    start_train_ids = np.unique(seq_start)[1:] + offset
+    start_train_ids = np.unique(seq_start) + offset
 
-    # return run.select_trains(by_id[start_train_ids])
-    return start_train_ids
+    tids = [tid for tid in start_train_ids if tid in run.train_ids]
+    return np.array(tids)
 
 
 @cache
 def fel_trigger(run: DataCollection, offset: int=0) -> DataCollection:
     """Select train IDs based on Dipole trigger information from a DataCollection."""
     seq_start = run["HED_PLAYGROUND/MDL/MASTER_TIMER_PPU", "sequenceStart"].ndarray()
-    start_train_ids = np.unique(seq_start)[1:] + offset
+    start_train_ids = np.unique(seq_start) + offset
 
-    # return run.select_trains(by_id[start_train_ids])
-    return start_train_ids
+    tids = [tid for tid in start_train_ids if tid in run.train_ids]
+    return np.array(tids)
 
 
 class DipolePPU(Enum):
